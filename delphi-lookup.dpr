@@ -591,22 +591,6 @@ begin
       SuccessPercent := 0;
     end;
 
-    // Get query_cache statistics
-    Query.SQL.Text :=
-      'SELECT ' +
-      '  COUNT(*) as total, ' +
-      '  SUM(CASE WHEN cache_valid = 1 THEN 1 ELSE 0 END) as valid, ' +
-      '  SUM(hit_count) as total_hits, ' +
-      '  SUM(CASE WHEN hit_count >= 3 THEN 1 ELSE 0 END) as popular ' +
-      'FROM query_cache';
-    Query.Open;
-
-    CacheEntries := Query.FieldByName('total').AsInteger;
-    ValidCacheEntries := Query.FieldByName('valid').AsInteger;
-    TotalHits := Query.FieldByName('total_hits').AsInteger;
-    PopularQueries := Query.FieldByName('popular').AsInteger;
-    Query.Close;
-
     WriteLn;
     WriteLn('Usage Statistics (query_log)');
     WriteLn('============================');
@@ -614,14 +598,46 @@ begin
     WriteLn(Format('Failed (0 results): %d (%.1f%%)', [FailedQueries, FailedPercent]));
     WriteLn(Format('Successful:         %d (%.1f%%)', [SuccessfulQueries, SuccessPercent]));
     WriteLn(Format('Avg duration:       %.0f ms', [AvgDuration]));
-    WriteLn;
 
-    WriteLn('Cache Statistics (query_cache)');
-    WriteLn('==============================');
-    WriteLn(Format('Unique queries:     %d', [CacheEntries]));
-    WriteLn(Format('Valid cache:        %d', [ValidCacheEntries]));
-    WriteLn(Format('Total hits:         %d', [TotalHits]));
-    WriteLn(Format('Popular (3+ hits):  %d', [PopularQueries]));
+    // Check if query_cache table exists
+    Query.SQL.Text := 'SELECT name FROM sqlite_master WHERE type=''table'' AND name=''query_cache''';
+    Query.Open;
+    if Query.EOF then
+    begin
+      Query.Close;
+      WriteLn;
+      WriteLn('Cache Statistics (query_cache)');
+      WriteLn('==============================');
+      WriteLn('(table not yet created - run a search first)');
+    end
+    else
+    begin
+      Query.Close;
+
+      // Get query_cache statistics
+      Query.SQL.Text :=
+        'SELECT ' +
+        '  COUNT(*) as total, ' +
+        '  SUM(CASE WHEN cache_valid = 1 THEN 1 ELSE 0 END) as valid, ' +
+        '  SUM(hit_count) as total_hits, ' +
+        '  SUM(CASE WHEN hit_count >= 3 THEN 1 ELSE 0 END) as popular ' +
+        'FROM query_cache';
+      Query.Open;
+
+      CacheEntries := Query.FieldByName('total').AsInteger;
+      ValidCacheEntries := Query.FieldByName('valid').AsInteger;
+      TotalHits := Query.FieldByName('total_hits').AsInteger;
+      PopularQueries := Query.FieldByName('popular').AsInteger;
+      Query.Close;
+
+      WriteLn;
+      WriteLn('Cache Statistics (query_cache)');
+      WriteLn('==============================');
+      WriteLn(Format('Unique queries:     %d', [CacheEntries]));
+      WriteLn(Format('Valid cache:        %d', [ValidCacheEntries]));
+      WriteLn(Format('Total hits:         %d', [TotalHits]));
+      WriteLn(Format('Popular (3+ hits):  %d', [PopularQueries]));
+    end;
     WriteLn;
 
   finally
