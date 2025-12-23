@@ -51,6 +51,29 @@ type
       const ARerankerURL: string = ''): TSearchResultList;
     function IsValidQuery(const AQuery: string): Boolean;
 
+    /// <summary>
+    /// Get all symbols in a specific file (for textDocument/documentSymbol).
+    /// </summary>
+    function GetSymbolsByFile(const AFilePath: string): TSearchResultList;
+
+    /// <summary>
+    /// Find the symbol that contains the given line number.
+    /// Returns nil if no symbol contains that line.
+    /// </summary>
+    function GetSymbolAtLine(const AFilePath: string; ALine: Integer): TSearchResult;
+
+    /// <summary>
+    /// Find symbol definition by exact name match (for textDocument/definition).
+    /// Returns nil if not found.
+    /// </summary>
+    function FindSymbolDefinition(const ASymbolName: string): TSearchResult;
+
+    /// <summary>
+    /// Find all references to a symbol name in indexed code (for textDocument/references).
+    /// Searches in content for usages of the symbol.
+    /// </summary>
+    function FindSymbolReferences(const ASymbolName: string; AMaxResults: Integer = 100): TSearchResultList;
+
     property ContentTypeFilter: string read FContentTypeFilter write FContentTypeFilter;
     property SourceCategoryFilter: string read FSourceCategoryFilter write FSourceCategoryFilter;
     property PreferCategory: string read FPreferCategory write FPreferCategory;
@@ -223,12 +246,16 @@ begin
   Result.ContentType := FQuery.FieldByName('content_type').AsString;
   Result.SourceCategory := FQuery.FieldByName('source_category').AsString;
 
-  // Read framework field if it exists
+  // Read optional fields if they exist
   try
     if FQuery.FindField('framework') <> nil then
       Result.Framework := FQuery.FieldByName('framework').AsString;
+    if FQuery.FindField('start_line') <> nil then
+      Result.StartLine := FQuery.FieldByName('start_line').AsInteger;
+    if FQuery.FindField('end_line') <> nil then
+      Result.EndLine := FQuery.FieldByName('end_line').AsInteger;
   except
-    // Ignore if framework field doesn't exist (old database)
+    // Ignore if optional fields don't exist (old database)
   end;
 
   // Apply preference boost if needed
@@ -574,6 +601,147 @@ begin
   finally
     if Assigned(Candidates) then
       Candidates.Free;
+  end;
+end;
+
+function TQueryProcessor.GetSymbolsByFile(const AFilePath: string): TSearchResultList;
+var
+  SearchResult: TSearchResult;
+begin
+  Result := TSearchResultList.Create;
+
+  if not FIsInitialized then
+    raise Exception.Create('QueryProcessor not initialized');
+
+  try
+    FQuery.SQL.Text :=
+      'SELECT * FROM symbols ' +
+      'WHERE file_path = :file_path ' +
+      'ORDER BY start_line, name';
+    FQuery.ParamByName('file_path').AsString := AFilePath;
+    FQuery.Open;
+
+    while not FQuery.EOF do
+    begin
+      SearchResult := CreateSearchResultFromQuery;
+      SearchResult.MatchType := 'file_symbol';
+      SearchResult.Score := 1.0;
+      Result.Add(SearchResult);
+      FQuery.Next;
+    end;
+
+    FQuery.Close;
+
+  except
+    on E: Exception do
+    begin
+      Result.Free;
+      raise Exception.CreateFmt('GetSymbolsByFile failed: %s', [E.Message]);
+    end;
+  end;
+end;
+
+function TQueryProcessor.GetSymbolAtLine(const AFilePath: string; ALine: Integer): TSearchResult;
+begin
+  Result := nil;
+
+  if not FIsInitialized then
+    raise Exception.Create('QueryProcessor not initialized');
+
+  try
+    // Find the symbol that contains the given line (1-indexed in DB, 0-indexed from LSP)
+    // We add 1 to convert from LSP 0-indexed to DB 1-indexed
+    FQuery.SQL.Text :=
+      'SELECT * FROM symbols ' +
+      'WHERE file_path = :file_path ' +
+      '  AND start_line <= :line ' +
+      '  AND (end_line >= :line OR end_line IS NULL) ' +
+      'ORDER BY start_line DESC ' +  // Innermost symbol first
+      'LIMIT 1';
+    FQuery.ParamByName('file_path').AsString := AFilePath;
+    FQuery.ParamByName('line').AsInteger := ALine + 1;  // Convert to 1-indexed
+    FQuery.Open;
+
+    if not FQuery.EOF then
+    begin
+      Result := CreateSearchResultFromQuery;
+      Result.MatchType := 'line_match';
+      Result.Score := 1.0;
+    end;
+
+    FQuery.Close;
+
+  except
+    on E: Exception do
+      raise Exception.CreateFmt('GetSymbolAtLine failed: %s', [E.Message]);
+  end;
+end;
+
+function TQueryProcessor.FindSymbolDefinition(const ASymbolName: string): TSearchResult;
+begin
+  // Reuse existing exact search - it already does what we need
+  Result := PerformExactSearch(ASymbolName);
+end;
+
+function TQueryProcessor.FindSymbolReferences(const ASymbolName: string; AMaxResults: Integer): TSearchResultList;
+var
+  CleanName: string;
+  SearchResult: TSearchResult;
+begin
+  Result := TSearchResultList.Create;
+
+  if not FIsInitialized then
+    raise Exception.Create('QueryProcessor not initialized');
+
+  CleanName := SanitizeQuery(ASymbolName);
+  if CleanName = '' then
+    Exit;
+
+  try
+    // Search for symbol name in content (as a word, not substring)
+    // Use word boundary pattern: the symbol should be preceded and followed by non-identifier chars
+    FQuery.SQL.Text :=
+      'SELECT * FROM symbols ' +
+      'WHERE (' +
+      '  content LIKE :pattern1 ' +        // word at start
+      '  OR content LIKE :pattern2 ' +     // word in middle
+      '  OR content LIKE :pattern3 ' +     // word at end
+      '  OR name = :name ' +               // definition itself
+      ') ' +
+      BuildFilterClause +
+      'ORDER BY ' +
+      '  CASE WHEN name = :name THEN 0 ELSE 1 END, ' +  // Definition first
+      '  file_path, start_line ' +
+      'LIMIT :max_results';
+
+    // Pattern matching for word boundaries (simplified - SQLite LIKE limitations)
+    FQuery.ParamByName('pattern1').AsString := CleanName + ' %';        // starts with word
+    FQuery.ParamByName('pattern2').AsString := '% ' + CleanName + ' %'; // word in middle
+    FQuery.ParamByName('pattern3').AsString := '% ' + CleanName;        // ends with word
+    FQuery.ParamByName('name').AsString := CleanName;
+    FQuery.ParamByName('max_results').AsInteger := AMaxResults;
+    FQuery.Open;
+
+    while not FQuery.EOF do
+    begin
+      SearchResult := CreateSearchResultFromQuery;
+      if SameText(SearchResult.Name, CleanName) then
+        SearchResult.MatchType := 'definition'
+      else
+        SearchResult.MatchType := 'reference';
+      SearchResult.Score := 0.8;
+      Result.Add(SearchResult);
+      FQuery.Next;
+    end;
+
+    FQuery.Close;
+
+  except
+    on E: Exception do
+    begin
+      Result.Free;
+      raise Exception.CreateFmt('FindSymbolReferences failed: %s', [E.Message]);
+    end;
   end;
 end;
 

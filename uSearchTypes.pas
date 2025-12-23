@@ -27,6 +27,8 @@ type
     FContentType: string;
     FSourceCategory: string;
     FFramework: string;
+    FStartLine: Integer;
+    FEndLine: Integer;
   public
     constructor Create;
 
@@ -46,6 +48,8 @@ type
     property ContentType: string read FContentType write FContentType;
     property SourceCategory: string read FSourceCategory write FSourceCategory;
     property Framework: string read FFramework write FFramework;
+    property StartLine: Integer read FStartLine write FStartLine;
+    property EndLine: Integer read FEndLine write FEndLine;
   end;
 
   TSearchResultList = class(TObjectList<TSearchResult>)
