@@ -5,6 +5,10 @@ All notable changes to delphi-lookup will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Unit name in search results**: Each result now shows `// Unit: UnitName` directly below the file path
+  - Eliminates need for AI agents to read source files just to determine the unit name for `uses` clauses
+  - Rationale: In Delphi, unit name = filename without `.pas` extension (compiler-enforced)
+  - AI agents were reading files unnecessarily to "verify" the unit name; explicit output prevents this
 - **Gemini CLI Setup Guide**: One-shot configuration prompt for Gemini CLI users (`gemini/GEMINI_SETUP.md`)
 - **Smart Cache Revalidation System**: Content-hash based cache validation that survives index updates
   - `content_hash` field in `symbols` table (MD5 of symbol content)
@@ -23,10 +27,11 @@ All notable changes to delphi-lookup will be documented in this file.
 - Realistic search examples documentation (`docs/HELP-SEARCH-EXAMPLES.md`)
 
 ### Changed
-- **Vector Search Recommendations**: Clarified recommendations by user type:
-  - AI agents: FTS5-only (iterate fast, 10x lower latency)
-  - Human developers on English codebases: Vector search recommended (higher single-shot precision)
-  - Updated CLAUDE.md and TECHNICAL-GUIDE.md with detailed rationale
+- **Vector Search Recommendations**: Tool is now AI-agent-only; FTS5 is the recommended mode
+  - AI agents iterate fast, achieving similar quality with multiple searches while being 17x faster
+  - Embedding infrastructure remains functional but not recommended for agent workflows
+  - Added `BENCHMARK-embedding-quality.md` with detailed quality comparison
+  - Updated CLAUDE.md with simplified recommendations
 - Cache format now uses `id:hash` pairs in `result_ids` for robust validation
 - `query_cache` table tracks hit counts, first/last seen timestamps, and average duration
 - `InvalidateQueryCache` now invalidates both `query_cache` and `query_log` tables
