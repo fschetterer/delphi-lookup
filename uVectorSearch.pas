@@ -60,7 +60,6 @@ implementation
 
 uses
   System.IOUtils,
-  System.Text,
   FireDAC.Stan.Param;
 
 var
