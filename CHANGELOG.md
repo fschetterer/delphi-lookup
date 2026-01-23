@@ -5,6 +5,25 @@ All notable changes to delphi-lookup will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Parallel Processing for Indexing**: Major performance improvements for delphi-indexer
+  - `TParallelFolderScanner`: 8x speedup on folder scanning using `TParallel.For`
+  - `TParallelASTProcessor`: Worker pool with one parser per thread (3x+ speedup)
+  - Configurable worker count (default: CPU cores)
+- **Merkle-style Change Detection**: Fast detection of modified/deleted files
+  - `indexed_files` table tracking individual file hashes and timestamps
+  - Folder-level hash comparison to skip unchanged subtrees
+  - Automatic detection and cleanup of deleted files/folders
+  - No-change verification in <10ms for large codebases (was 17s)
+- Performance documentation: `docs/INCREMENTAL-INDEXING.md`, `docs/PARALLEL-PROCESSING.md`, `docs/PERFORMANCE.md`
+- Performance test suite: `Tests/Performance/PerformanceTests.dpr`
+
+### Changed
+- **Indexer Performance**: Dramatically faster incremental updates
+  - No changes: 10ms (was 17s) - 1700x faster
+  - Single file change: 5.8s (was 17s) - 2.9x faster
+  - `--force` flag preserved for full reindex when needed
+
+### Added
 - **Unit name in search results**: Each result now shows `// Unit: UnitName` directly below the file path
   - Eliminates need for AI agents to read source files just to determine the unit name for `uses` clauses
   - Rationale: In Delphi, unit name = filename without `.pas` extension (compiler-enforced)
