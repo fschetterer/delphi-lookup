@@ -106,6 +106,9 @@ var
   RevalidateCacheMode: Boolean;
   RevalidateMinHits: Integer;
 
+  // Reindex all registered folders mode
+  ReindexAllMode: Boolean;
+
 function GetDefaultDatabasePath: string;
 begin
   // Returns the full path to the database file in the executable's directory
@@ -135,6 +138,7 @@ begin
   WriteLn('Indexing Options:');
   WriteLn('  -h, --help           : Show this help message');
   WriteLn('  --list-folders       : List all indexed folders in database');
+  WriteLn('  --reindex-all        : Reindex all registered folders (uses stored category)');
   WriteLn('  --force              : Force full reindex (ignore timestamps/hashes)');
   WriteLn('  --buffer-size <n>    : Chunks before checkpoint (default: 500)');
   WriteLn('  --legacy             : Use legacy mode (all in memory, then save)');
@@ -327,6 +331,148 @@ begin
   end;
 end;
 
+// Forward declarations for ReindexAllFolders
+procedure ProcessFilesHybrid; forward;
+procedure ProcessFilesIncremental; forward;
+
+procedure ReindexAllFolders;
+var
+  Connection: TFDConnection;
+  Query: TFDQuery;
+  FoldersToIndex: TStringList;
+  FolderCategories: TStringList;
+  FolderTypes: TStringList;
+  I, SuccessCount, SkipCount, ErrorCount: Integer;
+  SavedFolderPath, SavedContentType, SavedSourceCategory: string;
+  TotalStopwatch: TStopwatch;
+begin
+  if not FileExists(DatabaseFile) then
+  begin
+    WriteLn('Database file not found: ' + DatabaseFile);
+    WriteLn('No folders have been indexed yet.');
+    Exit;
+  end;
+
+  // Save original values (in case they were set via command line)
+  SavedFolderPath := FolderPath;
+  SavedContentType := ContentType;
+  SavedSourceCategory := SourceCategory;
+
+  FoldersToIndex := TStringList.Create;
+  FolderCategories := TStringList.Create;
+  FolderTypes := TStringList.Create;
+  Connection := TFDConnection.Create(nil);
+  Query := TFDQuery.Create(nil);
+
+  try
+    TDatabaseConnectionHelper.ConfigureConnection(Connection, DatabaseFile, False);
+    Connection.Open;
+    Query.Connection := Connection;
+
+    // Query all indexed folders (only top-level, exclude subfolders)
+    Query.SQL.Text :=
+      'SELECT DISTINCT folder_path, content_type, source_category ' +
+      'FROM indexed_folders ' +
+      'WHERE parent_folder_path IS NULL OR parent_folder_path = '''' ' +
+      'ORDER BY folder_path';
+    Query.Open;
+
+    if Query.IsEmpty then
+    begin
+      WriteLn('No folders have been indexed yet.');
+      WriteLn('Use: delphi-indexer.exe <folder_path> to index a folder first.');
+      Exit;
+    end;
+
+    // Collect all folders first (so we can close the query before processing)
+    while not Query.Eof do
+    begin
+      FoldersToIndex.Add(Query.FieldByName('folder_path').AsString);
+      FolderTypes.Add(Query.FieldByName('content_type').AsString);
+      FolderCategories.Add(Query.FieldByName('source_category').AsString);
+      Query.Next;
+    end;
+    Query.Close;
+    Connection.Close;
+
+    WriteLn('');
+    WriteLn('Reindex All Folders');
+    WriteLn('===================');
+    WriteLn(Format('Database: %s', [DatabaseFile]));
+    WriteLn(Format('Folders to reindex: %d', [FoldersToIndex.Count]));
+    if ForceFullReindex then
+      WriteLn('Mode: Full reindex (--force)')
+    else
+      WriteLn('Mode: Incremental (changed files only)');
+    WriteLn('');
+
+    TotalStopwatch := TStopwatch.StartNew;
+    SuccessCount := 0;
+    SkipCount := 0;
+    ErrorCount := 0;
+
+    for I := 0 to FoldersToIndex.Count - 1 do
+    begin
+      FolderPath := FoldersToIndex[I];
+      ContentType := FolderTypes[I];
+      SourceCategory := FolderCategories[I];
+
+      WriteLn(Format('[%d/%d] %s', [I + 1, FoldersToIndex.Count, FolderPath]));
+      WriteLn(Format('        Type: %s, Category: %s', [ContentType, SourceCategory]));
+
+      // Check if folder still exists
+      if not TDirectory.Exists(FolderPath) then
+      begin
+        WriteLn('        SKIPPED: Folder no longer exists');
+        Inc(SkipCount);
+        WriteLn('');
+        Continue;
+      end;
+
+      try
+        // Use incremental processing (respects --force flag)
+        if ForceFullReindex then
+          ProcessFilesHybrid
+        else
+          ProcessFilesIncremental;
+
+        Inc(SuccessCount);
+      except
+        on E: Exception do
+        begin
+          WriteLn(Format('        ERROR: %s', [E.Message]));
+          Inc(ErrorCount);
+        end;
+      end;
+
+      WriteLn('');
+    end;
+
+    // Summary
+    WriteLn('===================');
+    WriteLn('Reindex Summary');
+    WriteLn('===================');
+    WriteLn(Format('Total folders:  %d', [FoldersToIndex.Count]));
+    WriteLn(Format('Successful:     %d', [SuccessCount]));
+    WriteLn(Format('Skipped:        %d (folder not found)', [SkipCount]));
+    WriteLn(Format('Errors:         %d', [ErrorCount]));
+    WriteLn(Format('Total time:     %.1f seconds', [TotalStopwatch.ElapsedMilliseconds / 1000]));
+    WriteLn('');
+
+  finally
+    Query.Free;
+    Connection.Free;
+    FoldersToIndex.Free;
+    FolderCategories.Free;
+    FolderTypes.Free;
+
+    // Restore original values
+    FolderPath := SavedFolderPath;
+    ContentType := SavedContentType;
+    SourceCategory := SavedSourceCategory;
+  end;
+end;
+
 procedure InitializeParameterManager;
 begin
   PM := TParameterManager.Create;
@@ -464,6 +610,11 @@ begin
     ListIndexedFolders;
     Halt(0);
   end;
+
+  // Reindex all registered folders mode
+  ReindexAllMode := PM.HasParameter('reindex-all');
+  if ReindexAllMode then
+    Exit;  // Will be handled in main block
 
   // === Normal indexing mode ===
 
@@ -1901,6 +2052,13 @@ begin
     if RevalidateCacheMode then
     begin
       RevalidateCache(DatabaseFile, RevalidateMinHits);
+      Halt(0);
+    end;
+
+    // Handle reindex all folders mode
+    if ReindexAllMode then
+    begin
+      ReindexAllFolders;
       Halt(0);
     end;
 
