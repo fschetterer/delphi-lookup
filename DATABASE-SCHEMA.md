@@ -38,9 +38,9 @@ schema_version         | 1
 
 ---
 
-### 2. `indexed_folders` - Per-Folder Tracking
+### 2. `indexed_folders` - Per-Folder Tracking with Merkle-tree Support
 
-**Purpose**: Tracks which folders have been indexed and when
+**Purpose**: Tracks which folders have been indexed and when, with hierarchical change detection support
 
 **Schema**:
 ```sql
@@ -49,17 +49,35 @@ CREATE TABLE IF NOT EXISTS indexed_folders (
   indexed_at TIMESTAMP NOT NULL,
   duration_seconds INTEGER NOT NULL,
   files_count INTEGER NOT NULL,
-  chunks_count INTEGER NOT NULL
+  chunks_count INTEGER NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'code',
+  source_category TEXT NOT NULL DEFAULT 'user',
+  -- Merkle-tree support columns (REQ-002)
+  folder_hash TEXT DEFAULT '',
+  parent_folder_path TEXT,
+  subfolders_list TEXT DEFAULT '[]',
+  FOREIGN KEY (parent_folder_path) REFERENCES indexed_folders(folder_path) ON DELETE SET NULL
 )
 ```
 
+**Field Descriptions**:
+- `folder_path`: Absolute path to the indexed folder (PRIMARY KEY)
+- `indexed_at`: Timestamp when folder was last indexed
+- `duration_seconds`: Time taken to index this folder
+- `files_count`: Number of files processed
+- `chunks_count`: Number of symbols extracted
+- `content_type`: Type of content (`code`, `help`, `markdown`)
+- `source_category`: Classification (`user`, `stdlib`, `third_party`, `official_help`)
+- `folder_hash`: MD5 hash of folder structure for change detection (Merkle-tree)
+- `parent_folder_path`: FK to parent indexed_folders entry (nullable for roots)
+- `subfolders_list`: JSON array of direct subfolder names for deletion detection
+
 **Sample Data**:
 ```
-folder_path              | indexed_at          | duration_seconds | files_count | chunks_count
--------------------------|---------------------|------------------|-------------|-------------
-C:\Projects\MyFramework  | 2025-11-05 19:57:14 | 1811             | 405         | 20446
-C:\Projects\MyApp        | 2025-11-05 21:15:30 | 2450             | 620         | 28500
-C:\Projects\Utils        | 2025-11-05 22:45:00 | 1950             | 380         | 15200
+folder_path              | indexed_at          | duration | files | chunks | folder_hash                      | parent_folder_path | subfolders_list
+-------------------------|---------------------|----------|-------|--------|----------------------------------|--------------------|-----------------
+C:\Projects\MyFramework  | 2025-11-05 19:57:14 | 1811     | 405   | 20446  | d41d8cd98f00b204e9800998ecf8427e | NULL               | ["Db","Utils"]
+C:\Projects\MyFramework\Db | 2025-11-05 19:57:14 | 120    | 50    | 2500   | 5d41402abc4b2a76b9719d911017c592 | C:\Projects\MyFramework | []
 ```
 
 **Queries**:
@@ -78,6 +96,62 @@ SELECT folder_path,
        ROUND(CAST(chunks_count AS FLOAT) / duration_seconds, 2) as chunks_per_second
 FROM indexed_folders
 ORDER BY chunks_per_second DESC;
+
+-- Hierarchical query: Get all children of a folder
+SELECT * FROM indexed_folders
+WHERE parent_folder_path = 'C:\Projects\MyFramework';
+
+-- Find folders with mismatched hashes (need reindex)
+SELECT folder_path, folder_hash FROM indexed_folders
+WHERE folder_hash = '' OR folder_hash IS NULL;
+```
+
+---
+
+### 2.1. `indexed_files` - Per-File Tracking (REQ-001)
+
+**Purpose**: Tracks individual files for incremental indexing with change detection
+
+**Schema**:
+```sql
+CREATE TABLE indexed_files (
+  file_path TEXT PRIMARY KEY,
+  folder_path TEXT NOT NULL,
+  file_hash TEXT NOT NULL,
+  last_modified INTEGER NOT NULL,
+  indexed_at INTEGER NOT NULL,
+  chunks_count INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (folder_path) REFERENCES indexed_folders(folder_path) ON DELETE CASCADE
+)
+```
+
+**Field Descriptions**:
+- `file_path`: Absolute path to the source file (Windows format)
+- `folder_path`: Reference to parent folder in `indexed_folders`
+- `file_hash`: MD5 hash of file content for change detection
+- `last_modified`: Unix timestamp of filesystem modification time
+- `indexed_at`: Unix timestamp when file was last indexed
+- `chunks_count`: Number of symbols extracted from this file
+
+**Indexes**:
+```sql
+CREATE INDEX idx_indexed_files_folder ON indexed_files(folder_path);
+CREATE INDEX idx_indexed_files_hash ON indexed_files(file_hash);
+CREATE INDEX idx_indexed_files_indexed_at ON indexed_files(indexed_at);
+```
+
+**Queries**:
+```sql
+-- Check if file has changed
+SELECT file_hash, last_modified FROM indexed_files WHERE file_path = :path;
+
+-- Get all files in a folder
+SELECT file_path, file_hash, indexed_at, chunks_count
+FROM indexed_files WHERE folder_path = :folder_path;
+
+-- Find recently indexed files
+SELECT file_path, indexed_at FROM indexed_files
+WHERE indexed_at > :since_timestamp ORDER BY indexed_at DESC;
 ```
 
 ---

@@ -28,7 +28,10 @@ uses
   uDatabaseConnection in 'uDatabaseConnection.pas',
   uConfig in 'uConfig.pas',
   uFolderScanner in 'uFolderScanner.pas',
+  uParallelFolderScanner in 'uParallelFolderScanner.pas',
   uASTProcessor in 'uASTProcessor.pas',
+  uParallelASTProcessor in 'uParallelASTProcessor.pas',
+  uChangeDetector in 'uChangeDetector.pas',
   uGlossaryEnricher in 'uGlossaryEnricher.pas',
   uDatabaseBuilder in 'uDatabaseBuilder.pas',
   uIndexerEmbeddings.Ollama in 'uIndexerEmbeddings.Ollama.pas',
@@ -1500,6 +1503,356 @@ begin
   end;
 end;
 
+/// <summary>
+/// Incremental file processing using TChangeDetector, TParallelFolderScanner,
+/// and TParallelASTProcessor. Only processes changed/new files, deletes
+/// removed files from database.
+///
+/// REQ-Integration: Integrates all optimization components into main flow.
+///
+/// Flow:
+/// 1. TChangeDetector.DetectChanges() -> list of modified files
+/// 2. TChangeDetector.DetectDeletedFiles() -> delete from DB
+/// 3. TChangeDetector.DetectAndDeleteEliminatedFolders() -> cascade delete
+/// 4. If changed files: TParallelFolderScanner + TParallelASTProcessor
+/// 5. TDatabaseBuilder.InsertChunkBatch() with embeddings
+/// </summary>
+procedure ProcessFilesIncremental;
+var
+  Connection: TFDConnection;
+  ChangeDetector: TChangeDetector;
+  ParallelProcessor: TParallelASTProcessor;
+  EmbeddingGenerator: TOllamaEmbeddingGenerator;
+  DatabaseBuilder: TDatabaseBuilder;
+  ChangedFiles, DeletedFiles: TStringList;
+  ParsedFiles: TStringList;
+  CodeChunks: TCodeChunkList;
+  Embeddings: TEmbeddingList;
+  PendingFiles: TDictionary<string, Integer>;
+  TotalStopwatch, StepStopwatch: TStopwatch;
+  StartTime: TDateTime;
+  DeletedFolderCount, DeletedSymbolCount, DeletedFileCount: Integer;
+  I: Integer;
+  FilePath, FileContent: string;
+  ParsedFile: TParsedFile;
+begin
+  TotalStopwatch := TStopwatch.StartNew;
+  StartTime := Now;
+
+  WriteLn('Pascal Code Index Builder (Incremental Mode)');
+  WriteLn('=============================================');
+  WriteLn(Format('Folder: %s', [FolderPath]));
+  WriteLn(Format('Database: %s', [DatabaseFile]));
+  WriteLn;
+
+  // Check if database exists - if not, fall back to hybrid mode
+  if not FileExists(DatabaseFile) then
+  begin
+    WriteLn('[INFO] Database does not exist. Falling back to full index (hybrid mode).');
+    WriteLn;
+    ProcessFilesHybrid;
+    Exit;
+  end;
+
+  ChangedFiles := TStringList.Create;
+  DeletedFiles := TStringList.Create;
+  Connection := TFDConnection.Create(nil);
+
+  try
+    // Step 1: Connect to database
+    WriteLn('Step 1: Connecting to database...');
+    StepStopwatch := TStopwatch.StartNew;
+
+    TDatabaseConnectionHelper.ConfigureConnection(Connection, DatabaseFile, False);
+    Connection.Open;
+
+    // Enable WAL mode
+    var Query := TFDQuery.Create(nil);
+    try
+      Query.Connection := Connection;
+      Query.SQL.Text := 'PRAGMA journal_mode=WAL';
+      Query.ExecSQL;
+    finally
+      Query.Free;
+    end;
+
+    WriteLn(Format('  Connected in %d ms', [StepStopwatch.ElapsedMilliseconds]));
+
+    // Step 2: Detect changes using TChangeDetector
+    WriteLn('Step 2: Detecting changes (Merkle-style)...');
+    StepStopwatch.Reset;
+    StepStopwatch.Start;
+
+    ChangeDetector := TChangeDetector.Create(Connection);
+    try
+      ChangeDetector.DetectChanges(FolderPath, ChangedFiles, DeletedFiles);
+
+      WriteLn(Format('  Changed files: %d', [ChangedFiles.Count]));
+      WriteLn(Format('  Deleted files: %d', [DeletedFiles.Count]));
+      WriteLn(Format('  Folders checked: %d, skipped: %d',
+        [ChangeDetector.FoldersChecked, ChangeDetector.FoldersSkipped]));
+      WriteLn(Format('  Files checked: %d, skipped: %d',
+        [ChangeDetector.FilesChecked, ChangeDetector.FilesSkipped]));
+      WriteLn(Format('  Detection time: %d ms', [StepStopwatch.ElapsedMilliseconds]));
+
+      // Step 3: Handle deleted folders (cascade delete)
+      WriteLn('Step 3: Processing deleted folders...');
+      StepStopwatch.Reset;
+      StepStopwatch.Start;
+
+      if ChangeDetector.DetectAndDeleteEliminatedFolders(FolderPath,
+        DeletedFolderCount, DeletedSymbolCount) then
+      begin
+        WriteLn(Format('  Deleted %d folders, %d symbols in %d ms',
+          [DeletedFolderCount, DeletedSymbolCount, StepStopwatch.ElapsedMilliseconds]));
+      end
+      else
+        WriteLn('  No deleted folders');
+
+      // Step 4: Handle deleted files
+      WriteLn('Step 4: Processing deleted files...');
+      StepStopwatch.Reset;
+      StepStopwatch.Start;
+
+      DeletedFileCount := 0;
+      for I := 0 to DeletedFiles.Count - 1 do
+      begin
+        ChangeDetector.CleanupDeletedFile(DeletedFiles[I]);
+        Inc(DeletedFileCount);
+      end;
+
+      if DeletedFileCount > 0 then
+        WriteLn(Format('  Cleaned up %d deleted files in %d ms',
+          [DeletedFileCount, StepStopwatch.ElapsedMilliseconds]))
+      else
+        WriteLn('  No deleted files to clean up');
+
+    finally
+      ChangeDetector.Free;
+    end;
+
+    // If no changed files, we're done
+    if ChangedFiles.Count = 0 then
+    begin
+      TotalStopwatch.Stop;
+      WriteLn;
+      WriteLn('=============================================');
+      WriteLn('No changes detected. Index is up to date.');
+      WriteLn(Format('Total time: %d ms', [TotalStopwatch.ElapsedMilliseconds]));
+      Exit;
+    end;
+
+    // Step 5: Load content for changed files
+    WriteLn(Format('Step 5: Loading content for %d changed files...', [ChangedFiles.Count]));
+    StepStopwatch.Reset;
+    StepStopwatch.Start;
+
+    ParsedFiles := TStringList.Create;
+    try
+      for I := 0 to ChangedFiles.Count - 1 do
+      begin
+        FilePath := ChangedFiles[I];
+        try
+          // Load file content
+          var FileLines := TStringList.Create;
+          try
+            FileLines.LoadFromFile(FilePath);
+            FileContent := FileLines.Text;
+          finally
+            FileLines.Free;
+          end;
+
+          // Truncate at implementation if not including full content
+          if EmbeddingURL = '' then
+          begin
+            // FTS-only mode: truncate at implementation
+            var Lines := TStringList.Create;
+            try
+              Lines.Text := FileContent;
+              for var J := 0 to Lines.Count - 1 do
+              begin
+                if SameText(Trim(Lines[J]), 'implementation') then
+                begin
+                  // Keep only interface section
+                  while Lines.Count > J + 1 do
+                    Lines.Delete(J + 1);
+                  Lines.Add('');
+                  Lines.Add('end.');
+                  FileContent := Lines.Text;
+                  Break;
+                end;
+              end;
+            finally
+              Lines.Free;
+            end;
+          end;
+
+          ParsedFile := TParsedFile.Create(FilePath, Trim(FileContent));
+          ParsedFiles.AddObject(FilePath, ParsedFile);
+        except
+          on E: Exception do
+            WriteLn(Format('  [WARN] Failed to load %s: %s', [ExtractFileName(FilePath), E.Message]));
+        end;
+      end;
+
+      WriteLn(Format('  Loaded %d files in %d ms', [ParsedFiles.Count, StepStopwatch.ElapsedMilliseconds]));
+
+      // Step 6: Parse using TParallelASTProcessor
+      WriteLn('Step 6: Parsing files (parallel)...');
+      StepStopwatch.Reset;
+      StepStopwatch.Start;
+
+      ParallelProcessor := TParallelASTProcessor.Create;
+      try
+        ParallelProcessor.ShowProgress := True;
+        CodeChunks := ParallelProcessor.ProcessFiles(ParsedFiles);
+        WriteLn(Format('  Generated %d chunks in %d ms',
+          [CodeChunks.Count, StepStopwatch.ElapsedMilliseconds]));
+      finally
+        ParallelProcessor.Free;
+      end;
+
+      // Step 7: Generate embeddings (if enabled)
+      if EmbeddingURL <> '' then
+      begin
+        WriteLn('Step 7: Generating embeddings...');
+        StepStopwatch.Reset;
+        StepStopwatch.Start;
+
+        EmbeddingGenerator := TOllamaEmbeddingGenerator.Create(EmbeddingURL, EmbeddingModel, DEFAULT_BATCH_SIZE);
+        try
+          EmbeddingDimensions := EmbeddingGenerator.DetectEmbeddingDimensions;
+          Embeddings := EmbeddingGenerator.GenerateEmbeddings(CodeChunks);
+          WriteLn(Format('  Generated %d embeddings in %d ms',
+            [Embeddings.Count, StepStopwatch.ElapsedMilliseconds]));
+        finally
+          EmbeddingGenerator.Free;
+        end;
+      end
+      else
+      begin
+        WriteLn('Step 7: Embeddings DISABLED (FTS5 only mode)');
+        Embeddings := TEmbeddingList.Create;
+        EmbeddingDimensions := 0;
+      end;
+
+      // Step 8: Write to database
+      WriteLn('Step 8: Writing to database...');
+      StepStopwatch.Reset;
+      StepStopwatch.Start;
+
+      DatabaseBuilder := TDatabaseBuilder.Create;
+      try
+        // Use hybrid mode infrastructure for writing
+        DatabaseBuilder.InitializeForHybrid(DatabaseFile, EmbeddingURL, EmbeddingModel,
+          EmbeddingDimensions, ContentType, SourceCategory, ExplicitFramework, MappingFile);
+
+        // First, remove old symbols for changed files
+        for I := 0 to ChangedFiles.Count - 1 do
+        begin
+          var RemoveQuery := TFDQuery.Create(nil);
+          try
+            RemoveQuery.Connection := DatabaseBuilder.Connection;
+
+            // Delete from vec_embeddings first (FK constraint)
+            try
+              RemoveQuery.SQL.Text :=
+                'DELETE FROM vec_embeddings WHERE symbol_id IN ' +
+                '(SELECT id FROM symbols WHERE file_path = :file_path)';
+              RemoveQuery.ParamByName('file_path').AsString := ChangedFiles[I];
+              RemoveQuery.ExecSQL;
+            except
+              // vec_embeddings might not exist
+            end;
+
+            // Delete from symbols_fts
+            try
+              RemoveQuery.SQL.Text :=
+                'DELETE FROM symbols_fts WHERE rowid IN ' +
+                '(SELECT id FROM symbols WHERE file_path = :file_path)';
+              RemoveQuery.ParamByName('file_path').AsString := ChangedFiles[I];
+              RemoveQuery.ExecSQL;
+            except
+              // FTS might not exist
+            end;
+
+            // Delete symbols
+            RemoveQuery.SQL.Text := 'DELETE FROM symbols WHERE file_path = :file_path';
+            RemoveQuery.ParamByName('file_path').AsString := ChangedFiles[I];
+            RemoveQuery.ExecSQL;
+          finally
+            RemoveQuery.Free;
+          end;
+        end;
+
+        // Insert new chunks
+        DatabaseBuilder.InsertChunkBatch(CodeChunks, Embeddings);
+
+        // Checkpoint files
+        PendingFiles := TDictionary<string, Integer>.Create;
+        try
+          // Count chunks per file
+          for I := 0 to CodeChunks.Count - 1 do
+          begin
+            var ChunkFileName := CodeChunks[I].FileName;
+            if PendingFiles.ContainsKey(ChunkFileName) then
+              PendingFiles[ChunkFileName] := PendingFiles[ChunkFileName] + 1
+            else
+              PendingFiles.Add(ChunkFileName, 1);
+          end;
+
+          // Also add files with 0 chunks (they still need hash updated)
+          for I := 0 to ChangedFiles.Count - 1 do
+          begin
+            if not PendingFiles.ContainsKey(ChangedFiles[I]) then
+              PendingFiles.Add(ChangedFiles[I], 0);
+          end;
+
+          // Store file hashes
+          for var KeyPath in PendingFiles.Keys do
+            DatabaseBuilder.CheckpointFile(KeyPath, PendingFiles[KeyPath]);
+        finally
+          PendingFiles.Free;
+        end;
+
+        // Finalize
+        DatabaseBuilder.FinalizeFolder(FolderPath, ParsedFiles.Count, CodeChunks.Count,
+          StartTime, ChangedFiles.Count);
+
+        WriteLn(Format('  Wrote %d chunks in %d ms',
+          [CodeChunks.Count, StepStopwatch.ElapsedMilliseconds]));
+      finally
+        DatabaseBuilder.Free;
+      end;
+
+      TotalStopwatch.Stop;
+
+      WriteLn;
+      WriteLn('=============================================');
+      WriteLn('Incremental indexing completed successfully!');
+      WriteLn(Format('Database: %s', [DatabaseFile]));
+      WriteLn(Format('Files processed: %d', [ParsedFiles.Count]));
+      WriteLn(Format('Chunks indexed: %d', [CodeChunks.Count]));
+      WriteLn(Format('Total time: %d ms', [TotalStopwatch.ElapsedMilliseconds]));
+
+      // Cleanup
+      CodeChunks.Free;
+      Embeddings.Free;
+
+    finally
+      // Free parsed files
+      for I := 0 to ParsedFiles.Count - 1 do
+        ParsedFiles.Objects[I].Free;
+      ParsedFiles.Free;
+    end;
+
+  finally
+    Connection.Free;
+    ChangedFiles.Free;
+    DeletedFiles.Free;
+  end;
+end;
+
 begin
   try
     ParseCommandLine;
@@ -1612,11 +1965,24 @@ begin
         Halt(1);
       end;
 
-      // Use hybrid mode (default) or legacy mode
-      if UseHybridMode then
-        ProcessFilesHybrid
+      // Decision tree for processing mode:
+      // 1. --force flag: use full reindex (hybrid or legacy)
+      // 2. --legacy flag: use legacy full processing
+      // 3. Default: use incremental mode (TChangeDetector + parallel components)
+      if ForceFullReindex then
+      begin
+        // Full reindex requested - use hybrid or legacy based on --legacy flag
+        if UseHybridMode then
+          ProcessFilesHybrid
+        else
+          ProcessFiles;
+      end
       else
-        ProcessFiles;
+      begin
+        // Incremental mode (default) - uses TChangeDetector
+        // Falls back to ProcessFilesHybrid if database doesn't exist
+        ProcessFilesIncremental;
+      end;
     end;
 
   except

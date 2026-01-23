@@ -170,7 +170,9 @@
         </DelphiCompile>
         <DCCReference Include="uConfig.pas"/>
         <DCCReference Include="uFolderScanner.pas"/>
+        <DCCReference Include="uParallelFolderScanner.pas"/>
         <DCCReference Include="uASTProcessor.pas"/>
+        <DCCReference Include="uParallelASTProcessor.pas"/>
         <DCCReference Include="uGlossaryEnricher.pas"/>
         <DCCReference Include="uDatabaseBuilder.pas"/>
         <DCCReference Include="uIndexerEmbeddings.Ollama.pas"/>

@@ -8,6 +8,7 @@ uses
   System.Variants,
   System.Generics.Collections,
   System.DateUtils,
+  System.SyncObjs,
   Data.DB,
   FireDAC.Comp.Client,
   uConfig,
@@ -18,6 +19,78 @@ uses
 
 type
   TFileStatus = (fsNew, fsModified, fsUnchanged, fsSkippedByTimestamp);
+
+  /// <summary>
+  /// Parsed symbol result from parallel workers (REQ-008).
+  /// This is a lightweight record that can be safely passed across threads.
+  /// The embedding is stored as raw float array to avoid object lifetime issues.
+  /// </summary>
+  TParsedSymbol = record
+    // Core identification
+    ChunkGUID: string;           // Unique GUID for this chunk (for embedding matching)
+    Name: string;
+    FullName: string;
+    SymbolType: string;          // 'class', 'function', 'procedure', etc.
+    FilePath: string;
+
+    // Content
+    Content: string;             // Source code content (may be signature-only for FTS)
+    EnrichedText: string;        // Full content for embeddings
+    Comments: string;
+
+    // Metadata
+    ParentClass: string;
+    ImplementedInterfaces: string;  // Comma-separated list
+    Visibility: string;
+    StartLine: Integer;
+    EndLine: Integer;
+    IsDeclaration: Boolean;
+
+    // Classification
+    ContentType: string;         // 'code', 'help', 'markdown'
+    SourceCategory: string;      // 'user', 'stdlib', 'third_party'
+    Framework: string;           // 'VCL', 'FMX', 'RTL', ''
+
+    // Embedding (stored as array, not object)
+    HasEmbedding: Boolean;
+    EmbeddingVector: TArray<Single>;
+    EmbeddingText: string;
+  end;
+
+  TParsedSymbolArray = TArray<TParsedSymbol>;
+
+  /// <summary>
+  /// Thread-safe queue for passing parsed symbols from workers to database writer.
+  /// Uses a simple lock-based approach for producer-consumer pattern.
+  /// </summary>
+  TSymbolQueue = class
+  private
+    FQueue: TList<TParsedSymbol>;
+    FLock: TCriticalSection;
+    FClosed: Boolean;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    /// <summary>Add a symbol to the queue (thread-safe)</summary>
+    procedure Enqueue(const ASymbol: TParsedSymbol);
+
+    /// <summary>Add multiple symbols to the queue (thread-safe, more efficient)</summary>
+    procedure EnqueueBatch(const ASymbols: TParsedSymbolArray);
+
+    /// <summary>Get up to AMaxCount symbols from the queue (thread-safe).
+    /// Returns empty array if queue is empty.</summary>
+    function DequeueBatch(AMaxCount: Integer): TParsedSymbolArray;
+
+    /// <summary>Returns current queue count (thread-safe)</summary>
+    function Count: Integer;
+
+    /// <summary>Signal that no more items will be added</summary>
+    procedure Close;
+
+    /// <summary>Check if queue is closed and empty</summary>
+    function IsFinished: Boolean;
+  end;
 
   TDatabaseBuilder = class
   private
@@ -41,7 +114,8 @@ type
     function DetectFramework(const AFilePath, AUnitName: string): string;
     procedure StoreMetadata(const AKey, AValue: string);
     procedure RecordFolderIndexing(const AFolderPath: string;
-      AStartTime, AEndTime: TDateTime; AFilesCount, AChunksCount: Integer);
+      AStartTime, AEndTime: TDateTime; AFilesCount, AChunksCount: Integer;
+      const AFolderHash: string = ''; const ASubfoldersList: string = '[]');
 
     // Incremental indexing methods
     function CalculateFileHash(const AFilePath: string): string;
@@ -104,13 +178,41 @@ type
     /// <summary>Check if a column exists in a table</summary>
     function ColumnExists(const ATable, AColumn: string): Boolean;
 
+    /// <summary>Check if a table exists in the database</summary>
+    function TableExists(const ATable: string): Boolean;
+
     /// <summary>Migrate query_log data to query_cache table</summary>
     procedure MigrateQueryLogToCache;
+
+    /// <summary>Migrate schema to support indexed_files table (REQ-001)</summary>
+    procedure MigrateToIndexedFilesSchema;
+
+    /// <summary>Migrate indexed_folders schema for Merkle-tree support (REQ-002)</summary>
+    procedure MigrateToFolderHierarchySchema;
 
     /// <summary>Insert symbol with documentation fields (for CHM indexing)</summary>
     procedure InsertSymbol(const AName, AFullName, AType, AFilePath, AContent: string;
       const AComments, AParentClass: string; AEmbedding: TEmbedding;
       const AFramework, APlatforms, ADelphiVersion: string); overload;
+
+    // === REQ-008: Parallel Results Queue Consumer ===
+
+    /// <summary>Insert a batch of parsed symbols (from parallel workers).
+    /// Uses a single transaction for the entire batch. Thread-safe when called from main thread.</summary>
+    /// <param name="ASymbols">Array of parsed symbols with optional embeddings</param>
+    procedure InsertSymbolsBatch(const ASymbols: TParsedSymbolArray);
+
+    /// <summary>Consume symbols from queue until empty or closed.
+    /// Processes in batches of ABatchSize symbols each.
+    /// Call this from the main thread to write to database.</summary>
+    /// <param name="AQueue">Thread-safe queue to consume from</param>
+    /// <param name="ABatchSize">Number of symbols per batch (default: 100)</param>
+    /// <param name="AOnProgress">Optional progress callback (symbols processed, total time ms)</param>
+    procedure ConsumeFromQueue(AQueue: TSymbolQueue; ABatchSize: Integer = 100;
+      AOnProgress: TProc<Integer, Int64> = nil);
+
+    /// <summary>Default batch size for queue consumption</summary>
+    class var DefaultBatchSize: Integer;
   end;
 
 implementation
@@ -120,7 +222,103 @@ uses
   System.IOUtils,
   System.Hash,
   System.StrUtils,
-  FireDAC.Stan.Param;
+  System.Diagnostics,
+  System.JSON,
+  FireDAC.Stan.Param,
+  uChangeDetector;
+
+{ TSymbolQueue }
+
+constructor TSymbolQueue.Create;
+begin
+  inherited Create;
+  FQueue := TList<TParsedSymbol>.Create;
+  FLock := TCriticalSection.Create;
+  FClosed := False;
+end;
+
+destructor TSymbolQueue.Destroy;
+begin
+  FLock.Free;
+  FQueue.Free;
+  inherited Destroy;
+end;
+
+procedure TSymbolQueue.Enqueue(const ASymbol: TParsedSymbol);
+begin
+  FLock.Enter;
+  try
+    if not FClosed then
+      FQueue.Add(ASymbol);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TSymbolQueue.EnqueueBatch(const ASymbols: TParsedSymbolArray);
+var
+  I: Integer;
+begin
+  FLock.Enter;
+  try
+    if not FClosed then
+    begin
+      for I := 0 to High(ASymbols) do
+        FQueue.Add(ASymbols[I]);
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TSymbolQueue.DequeueBatch(AMaxCount: Integer): TParsedSymbolArray;
+var
+  ActualCount, I: Integer;
+begin
+  FLock.Enter;
+  try
+    ActualCount := Min(AMaxCount, FQueue.Count);
+    SetLength(Result, ActualCount);
+
+    for I := 0 to ActualCount - 1 do
+      Result[I] := FQueue[I];
+
+    // Remove dequeued items
+    FQueue.DeleteRange(0, ActualCount);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TSymbolQueue.Count: Integer;
+begin
+  FLock.Enter;
+  try
+    Result := FQueue.Count;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TSymbolQueue.Close;
+begin
+  FLock.Enter;
+  try
+    FClosed := True;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TSymbolQueue.IsFinished: Boolean;
+begin
+  FLock.Enter;
+  try
+    Result := FClosed and (FQueue.Count = 0);
+  finally
+    FLock.Leave;
+  end;
+end;
 
 /// <summary>Extract method signature from full implementation code.
 /// For FTS indexing, we only want the signature, not the body.</summary>
@@ -281,6 +479,7 @@ begin
     FQuery.ExecSQL;
 
     // Create indexed_folders table for tracking processed folders
+    // Includes Merkle-tree support fields for hierarchical change detection (REQ-002)
     FQuery.SQL.Text := '''
       CREATE TABLE IF NOT EXISTS indexed_folders (
         folder_path TEXT PRIMARY KEY,
@@ -289,7 +488,11 @@ begin
         files_count INTEGER NOT NULL,
         chunks_count INTEGER NOT NULL,
         content_type TEXT NOT NULL DEFAULT 'code',
-        source_category TEXT NOT NULL DEFAULT 'user'
+        source_category TEXT NOT NULL DEFAULT 'user',
+        folder_hash TEXT DEFAULT '',
+        parent_folder_path TEXT,
+        subfolders_list TEXT DEFAULT '[]',
+        FOREIGN KEY (parent_folder_path) REFERENCES indexed_folders(folder_path) ON DELETE SET NULL
       )
     ''';
     FQuery.ExecSQL;
@@ -595,15 +798,20 @@ begin
 end;
 
 procedure TDatabaseBuilder.RecordFolderIndexing(const AFolderPath: string;
-  AStartTime, AEndTime: TDateTime; AFilesCount, AChunksCount: Integer);
+  AStartTime, AEndTime: TDateTime; AFilesCount, AChunksCount: Integer;
+  const AFolderHash: string; const ASubfoldersList: string);
 var
   DurationSeconds: Integer;
 begin
   DurationSeconds := SecondsBetween(AEndTime, AStartTime);
 
   FQuery.SQL.Text := '''
-    INSERT OR REPLACE INTO indexed_folders (folder_path, indexed_at, duration_seconds, files_count, chunks_count, content_type, source_category)
-    VALUES (:folder_path, :indexed_at, :duration_seconds, :files_count, :chunks_count, :content_type, :source_category)
+    INSERT OR REPLACE INTO indexed_folders
+    (folder_path, indexed_at, duration_seconds, files_count, chunks_count,
+     content_type, source_category, folder_hash, subfolders_list)
+    VALUES
+    (:folder_path, :indexed_at, :duration_seconds, :files_count, :chunks_count,
+     :content_type, :source_category, :folder_hash, :subfolders_list)
   ''';
   FQuery.ParamByName('folder_path').AsString := AFolderPath;
   FQuery.ParamByName('indexed_at').AsString := FormatDateTime('yyyy-mm-dd hh:nn:ss', AEndTime);
@@ -612,6 +820,8 @@ begin
   FQuery.ParamByName('chunks_count').AsInteger := AChunksCount;
   FQuery.ParamByName('content_type').AsString := FContentType;
   FQuery.ParamByName('source_category').AsString := FSourceCategory;
+  FQuery.ParamByName('folder_hash').AsString := AFolderHash;
+  FQuery.ParamByName('subfolders_list').AsString := ASubfoldersList;
   FQuery.ExecSQL;
 
   WriteLn(Format('Recorded folder indexing: %s (%d files, %d chunks, %ds)',
@@ -1465,8 +1675,17 @@ begin
               // Record folder indexing statistics INSIDE transaction
               EndTime := Now;
               StoreMetadata('last_update', FormatDateTime('yyyy-mm-dd hh:nn:ss', EndTime));
-              RecordFolderIndexing(AFolderPath, StartTime, EndTime,
-                NewCount + ModifiedCount, ProcessedSymbols);
+
+              // Calculate folder hash for incremental indexing
+              var ChangeDetector := TChangeDetector.Create(FConnection);
+              try
+                var FolderHash := ChangeDetector.CalculateFolderHashForStorage(AFolderPath);
+                var SubfoldersList := ChangeDetector.GetSubfolderNames(AFolderPath);
+                RecordFolderIndexing(AFolderPath, StartTime, EndTime,
+                  NewCount + ModifiedCount, ProcessedSymbols, FolderHash, SubfoldersList);
+              finally
+                ChangeDetector.Free;
+              end;
             end;
 
             // Commit current batch
@@ -1517,7 +1736,16 @@ begin
 
           EndTime := Now;
           StoreMetadata('last_update', FormatDateTime('yyyy-mm-dd hh:nn:ss', EndTime));
-          RecordFolderIndexing(AFolderPath, StartTime, EndTime, 0, 0);
+
+          // Calculate folder hash even for empty runs (to detect future changes)
+          var ChangeDetector := TChangeDetector.Create(FConnection);
+          try
+            var FolderHash := ChangeDetector.CalculateFolderHashForStorage(AFolderPath);
+            var SubfoldersList := ChangeDetector.GetSubfolderNames(AFolderPath);
+            RecordFolderIndexing(AFolderPath, StartTime, EndTime, 0, 0, FolderHash, SubfoldersList);
+          finally
+            ChangeDetector.Free;
+          end;
 
           FConnection.Commit;
           WriteLn('*** COMMIT: No files to process, deleted files checked ***');
@@ -1648,6 +1876,19 @@ begin
   end;
 end;
 
+function TDatabaseBuilder.TableExists(const ATable: string): Boolean;
+begin
+  Result := False;
+  FQuery.SQL.Text := 'SELECT name FROM sqlite_master WHERE type=''table'' AND name=:tablename';
+  FQuery.ParamByName('tablename').AsString := ATable;
+  FQuery.Open;
+  try
+    Result := not FQuery.Eof;
+  finally
+    FQuery.Close;
+  end;
+end;
+
 procedure TDatabaseBuilder.MigrateToDocSchema;
 begin
   // Check if columns already exist
@@ -1714,6 +1955,12 @@ begin
 
   // Migrate existing query_log data to query_cache (one-time migration)
   MigrateQueryLogToCache;
+
+  // REQ-001: Migrate to indexed_files table for incremental indexing
+  MigrateToIndexedFilesSchema;
+
+  // REQ-002: Migrate indexed_folders for Merkle-tree hierarchical change detection
+  MigrateToFolderHierarchySchema;
 end;
 
 procedure TDatabaseBuilder.MigrateQueryLogToCache;
@@ -1786,6 +2033,132 @@ begin
   end;
 end;
 
+procedure TDatabaseBuilder.MigrateToIndexedFilesSchema;
+var
+  MigratedCount: Integer;
+begin
+  // REQ-001: Create indexed_files table for individual file tracking
+  // This table enables efficient incremental indexing by tracking file-level changes
+  if not TableExists('indexed_files') then
+  begin
+    WriteLn('Creating indexed_files table (REQ-001)...');
+
+    // Create the indexed_files table
+    // - file_path: Absolute path to the file (PRIMARY KEY)
+    // - folder_path: Reference to indexed_folders.folder_path (FK)
+    // - file_hash: MD5 hash of file content for change detection
+    // - last_modified: Unix timestamp of filesystem last modified time
+    // - indexed_at: Unix timestamp when file was indexed
+    // - chunks_count: Number of symbols extracted from this file
+    FQuery.SQL.Text := '''
+      CREATE TABLE indexed_files (
+        file_path TEXT PRIMARY KEY,
+        folder_path TEXT NOT NULL,
+        file_hash TEXT NOT NULL,
+        last_modified INTEGER NOT NULL,
+        indexed_at INTEGER NOT NULL,
+        chunks_count INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (folder_path) REFERENCES indexed_folders(folder_path) ON DELETE CASCADE
+      )
+    ''';
+    FQuery.ExecSQL;
+
+    // Create index on folder_path for efficient folder queries
+    FQuery.SQL.Text := 'CREATE INDEX idx_indexed_files_folder ON indexed_files(folder_path)';
+    FQuery.ExecSQL;
+
+    // Create index on file_hash for change detection queries
+    FQuery.SQL.Text := 'CREATE INDEX idx_indexed_files_hash ON indexed_files(file_hash)';
+    FQuery.ExecSQL;
+
+    // Create index on indexed_at for temporal queries
+    FQuery.SQL.Text := 'CREATE INDEX idx_indexed_files_indexed_at ON indexed_files(indexed_at)';
+    FQuery.ExecSQL;
+
+    WriteLn('indexed_files table created with indexes');
+
+    // Migrate data from file_hashes table if it exists
+    if TableExists('file_hashes') then
+    begin
+      WriteLn('Migrating data from file_hashes to indexed_files...');
+
+      // Migrate existing data, extracting folder_path from file_path
+      // Note: last_modified is set to 0 for migrated records (will be updated on next index)
+      FQuery.SQL.Text := '''
+        INSERT INTO indexed_files (file_path, folder_path, file_hash, last_modified, indexed_at, chunks_count)
+        SELECT
+          fh.file_path,
+          COALESCE(
+            (SELECT folder_path FROM indexed_folders
+             WHERE fh.file_path LIKE folder_path || '%'
+             ORDER BY LENGTH(folder_path) DESC
+             LIMIT 1),
+            ''
+          ) as folder_path,
+          fh.file_hash,
+          0 as last_modified,
+          CAST(strftime('%s', fh.last_indexed) AS INTEGER) as indexed_at,
+          fh.chunk_count
+        FROM file_hashes fh
+        WHERE fh.file_path NOT IN (SELECT file_path FROM indexed_files)
+      ''';
+      FQuery.ExecSQL;
+      MigratedCount := FQuery.RowsAffected;
+
+      WriteLn(Format('Migrated %d records from file_hashes to indexed_files', [MigratedCount]));
+    end;
+  end
+  else
+    WriteLn('indexed_files table already exists');
+end;
+
+procedure TDatabaseBuilder.MigrateToFolderHierarchySchema;
+begin
+  // REQ-002: Extend indexed_folders table for Merkle-tree hierarchical change detection
+  // New columns:
+  //   - folder_hash: MD5 hash of folder structure (sorted child names + file hashes)
+  //   - parent_folder_path: FK to parent indexed_folders entry (nullable for root folders)
+  //   - subfolders_list: JSON array of direct subfolder names for deletion detection
+
+  // Add folder_hash column if it doesn't exist
+  if not ColumnExists('indexed_folders', 'folder_hash') then
+  begin
+    WriteLn('Migrating indexed_folders schema for Merkle-tree support (REQ-002)...');
+
+    // Add folder_hash column - stores MD5 hash of folder content structure
+    // Empty string default for existing rows, will be populated on next index
+    FQuery.SQL.Text := 'ALTER TABLE indexed_folders ADD COLUMN folder_hash TEXT DEFAULT ''''';
+    FQuery.ExecSQL;
+    WriteLn('  Added folder_hash column');
+
+    // Add parent_folder_path column - references another indexed_folders entry
+    // Nullable because root folders don't have a parent
+    FQuery.SQL.Text := 'ALTER TABLE indexed_folders ADD COLUMN parent_folder_path TEXT';
+    FQuery.ExecSQL;
+    WriteLn('  Added parent_folder_path column');
+
+    // Add subfolders_list column - JSON array of direct subfolder names
+    // Used for fast deletion detection without filesystem scan
+    // Format: ["subfolder1", "subfolder2", ...]
+    FQuery.SQL.Text := 'ALTER TABLE indexed_folders ADD COLUMN subfolders_list TEXT DEFAULT ''[]''';
+    FQuery.ExecSQL;
+    WriteLn('  Added subfolders_list column');
+
+    // Create index on parent_folder_path for hierarchical queries
+    FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_indexed_folders_parent ON indexed_folders(parent_folder_path)';
+    FQuery.ExecSQL;
+    WriteLn('  Created index on parent_folder_path');
+
+    // Note: SQLite doesn't enforce FK constraints by default, and ALTER TABLE
+    // cannot add FK constraints. The constraint is enforced at application level.
+    // New databases get the FK from CreateTables.
+
+    WriteLn('Folder hierarchy schema migration complete');
+  end
+  else
+    WriteLn('Folder hierarchy schema already migrated (folder_hash column exists)');
+end;
+
 function TDatabaseBuilder.DetectFramework(const AFilePath, AUnitName: string): string;
 begin
   // Use new multi-tier framework detector if available
@@ -1850,6 +2223,10 @@ begin
   // Create connection and tables (load vec0 only if embeddings enabled)
   CreateConnection(ADatabaseFile, AEmbeddingDimensions > 0);
   CreateTables;
+
+  // Run migrations for existing databases (adds new columns, creates new tables)
+  MigrateToDocSchema;
+
   CreateIndexes;
 
   // Validate metadata (model compatibility)
@@ -1955,14 +2332,28 @@ procedure TDatabaseBuilder.FinalizeFolder(const AFolderPath: string;
   AFilesCount, AChunksCount: Integer; AStartTime: TDateTime; AFilesModified: Integer);
 var
   EndTime: TDateTime;
+  ChangeDetector: TChangeDetector;
+  FolderHash: string;
+  SubfoldersList: string;
 begin
   EndTime := Now;
+
+  // Calculate folder hash for incremental indexing (REQ-003)
+  // This hash is stored and compared on next run to detect changes
+  ChangeDetector := TChangeDetector.Create(FConnection);
+  try
+    FolderHash := ChangeDetector.CalculateFolderHashForStorage(AFolderPath);
+    SubfoldersList := ChangeDetector.GetSubfolderNames(AFolderPath);
+  finally
+    ChangeDetector.Free;
+  end;
 
   // Update last_update timestamp (when indexing completed, not started)
   StoreMetadata('last_update', FormatDateTime('yyyy-mm-dd hh:nn:ss', EndTime));
 
-  // Record folder indexing
-  RecordFolderIndexing(AFolderPath, AStartTime, EndTime, AFilesCount, AChunksCount);
+  // Record folder indexing with hash for change detection
+  RecordFolderIndexing(AFolderPath, AStartTime, EndTime, AFilesCount, AChunksCount,
+    FolderHash, SubfoldersList);
 
   // Only invalidate query cache if files were actually modified
   if AFilesModified > 0 then
@@ -1979,5 +2370,219 @@ begin
 
   WriteLn(Format('  Folder finalized: %d files, %d chunks', [AFilesCount, AChunksCount]));
 end;
+
+{ REQ-008: Parallel Results Queue Consumer }
+
+procedure TDatabaseBuilder.InsertSymbolsBatch(const ASymbols: TParsedSymbolArray);
+const
+  PROGRESS_INTERVAL = 100;
+var
+  I: Integer;
+  Symbol: TParsedSymbol;
+  SymbolID: Integer;
+  ContentHash: string;
+  VectorJSON: string;
+  USFormat: TFormatSettings;
+  TotalSymbols: Integer;
+  ShowProgress: Boolean;
+begin
+  TotalSymbols := Length(ASymbols);
+  if TotalSymbols = 0 then
+    Exit;
+
+  ShowProgress := TotalSymbols >= PROGRESS_INTERVAL;
+  USFormat := TFormatSettings.Create('en-US');
+
+  for I := 0 to TotalSymbols - 1 do
+  begin
+    Symbol := ASymbols[I];
+
+    try
+      // Calculate content hash for cache validation
+      ContentHash := THashMD5.GetHashString(Symbol.Content);
+
+      // Insert symbol
+      FQuery.SQL.Text := '''
+        INSERT OR REPLACE INTO symbols (
+          name, full_name, type, file_path, content, enriched_text,
+          comments, parent_class, implemented_interfaces, visibility,
+          start_line, end_line, content_type, source_category, framework, content_hash
+        ) VALUES (
+          :name, :full_name, :type, :file_path, :content, :enriched_text,
+          :comments, :parent_class, :implemented_interfaces, :visibility,
+          :start_line, :end_line, :content_type, :source_category, :framework, :content_hash
+        )
+      ''';
+
+      FQuery.ParamByName('name').AsString := Copy(Symbol.Name, 1, 255);
+      FQuery.ParamByName('full_name').AsString := Copy(Symbol.FullName, 1, 500);
+      FQuery.ParamByName('type').AsString := Symbol.SymbolType;
+      FQuery.ParamByName('file_path').AsString := Symbol.FilePath;
+      FQuery.ParamByName('content').AsWideMemo := Symbol.Content;
+      FQuery.ParamByName('enriched_text').AsWideMemo := Symbol.EnrichedText;
+      FQuery.ParamByName('comments').AsWideMemo := Symbol.Comments;
+      FQuery.ParamByName('parent_class').AsString := Symbol.ParentClass;
+      FQuery.ParamByName('implemented_interfaces').AsString := Symbol.ImplementedInterfaces;
+      FQuery.ParamByName('visibility').AsString := Symbol.Visibility;
+      FQuery.ParamByName('start_line').AsInteger := Symbol.StartLine;
+      FQuery.ParamByName('end_line').AsInteger := Symbol.EndLine;
+      FQuery.ParamByName('content_type').AsString := Symbol.ContentType;
+      FQuery.ParamByName('source_category').AsString := Symbol.SourceCategory;
+
+      // Framework (nullable)
+      if Symbol.Framework <> '' then
+        FQuery.ParamByName('framework').AsString := Symbol.Framework
+      else
+      begin
+        FQuery.ParamByName('framework').DataType := ftString;
+        FQuery.ParamByName('framework').Clear;
+      end;
+
+      FQuery.ParamByName('content_hash').AsString := ContentHash;
+      FQuery.ExecSQL;
+
+      // Get the symbol ID
+      FQuery.SQL.Text := 'SELECT last_insert_rowid() as id';
+      FQuery.Open;
+      SymbolID := FQuery.FieldByName('id').AsInteger;
+      FQuery.Close;
+
+      // Insert embedding if present
+      if Symbol.HasEmbedding and (Length(Symbol.EmbeddingVector) > 0) then
+      begin
+        // Build vector JSON
+        VectorJSON := '[';
+        for var J := 0 to High(Symbol.EmbeddingVector) do
+        begin
+          if J > 0 then
+            VectorJSON := VectorJSON + ',';
+          VectorJSON := VectorJSON + FloatToStr(Symbol.EmbeddingVector[J], USFormat);
+        end;
+        VectorJSON := VectorJSON + ']';
+
+        FQuery.SQL.Text := 'INSERT INTO vec_embeddings (symbol_id, chunk_id, embedding_text, embedding) ' +
+                           'VALUES (:symbol_id, :chunk_id, :embedding_text, :embedding)';
+        FQuery.ParamByName('symbol_id').AsInteger := SymbolID;
+        FQuery.ParamByName('chunk_id').AsString := Symbol.ChunkGUID;
+        FQuery.ParamByName('embedding_text').AsString := Symbol.EmbeddingText;
+        FQuery.ParamByName('embedding').AsString := VectorJSON;
+        FQuery.ExecSQL;
+      end;
+
+      // Progress feedback
+      if ShowProgress and ((I + 1) mod PROGRESS_INTERVAL = 0) then
+      begin
+        Write(Format(#13'  [DB] Batch insert: %d/%d (%.1f%%)   ',
+          [I + 1, TotalSymbols, (I + 1) * 100.0 / TotalSymbols]));
+        Flush(Output);
+      end;
+
+    except
+      on E: Exception do
+      begin
+        WriteLn(Format(#13'  [ERROR] Failed to insert symbol "%s": %s   ',
+          [Symbol.Name, E.Message]));
+        // Continue with next symbol instead of failing entire batch
+      end;
+    end;
+  end;
+
+  // Final progress message
+  if ShowProgress then
+    WriteLn(Format(#13'  [DB] Batch complete: %d symbols inserted.      ', [TotalSymbols]));
+end;
+
+procedure TDatabaseBuilder.ConsumeFromQueue(AQueue: TSymbolQueue; ABatchSize: Integer;
+  AOnProgress: TProc<Integer, Int64>);
+var
+  Batch: TParsedSymbolArray;
+  TotalProcessed: Integer;
+  BatchCount: Integer;
+  Stopwatch: TStopwatch;
+  InTransaction: Boolean;
+begin
+  if ABatchSize <= 0 then
+    ABatchSize := 100;
+
+  TotalProcessed := 0;
+  BatchCount := 0;
+  InTransaction := False;
+  Stopwatch := TStopwatch.StartNew;
+
+  WriteLn(Format('  [DB] Starting queue consumption (batch size: %d)', [ABatchSize]));
+
+  try
+    // Start transaction for batched writes
+    if not FConnection.InTransaction then
+    begin
+      FConnection.StartTransaction;
+      InTransaction := True;
+    end;
+
+    while True do
+    begin
+      // Get batch from queue
+      Batch := AQueue.DequeueBatch(ABatchSize);
+
+      if Length(Batch) = 0 then
+      begin
+        // Queue is empty - check if finished
+        if AQueue.IsFinished then
+          Break;
+
+        // Queue not closed but empty - wait a bit
+        Sleep(10);
+        Continue;
+      end;
+
+      Inc(BatchCount);
+
+      // Insert batch
+      InsertSymbolsBatch(Batch);
+      TotalProcessed := TotalProcessed + Length(Batch);
+
+      // Commit periodically to prevent large transaction logs
+      if (BatchCount mod 10 = 0) and InTransaction then
+      begin
+        FConnection.Commit;
+
+        // Checkpoint WAL
+        FQuery.SQL.Text := 'PRAGMA wal_checkpoint(PASSIVE)';
+        FQuery.ExecSQL;
+
+        FConnection.StartTransaction;
+
+        WriteLn(Format('  >>> Checkpoint: %d symbols (%d batches, %dms)',
+          [TotalProcessed, BatchCount, Stopwatch.ElapsedMilliseconds]));
+      end;
+
+      // Progress callback
+      if Assigned(AOnProgress) then
+        AOnProgress(TotalProcessed, Stopwatch.ElapsedMilliseconds);
+    end;
+
+    // Final commit
+    if InTransaction and FConnection.InTransaction then
+      FConnection.Commit;
+
+    Stopwatch.Stop;
+
+    WriteLn(Format('  [DB] Queue consumption complete: %d symbols in %d batches (%dms)',
+      [TotalProcessed, BatchCount, Stopwatch.ElapsedMilliseconds]));
+
+  except
+    on E: Exception do
+    begin
+      // Rollback on error
+      if InTransaction and FConnection.InTransaction then
+        FConnection.Rollback;
+      raise Exception.CreateFmt('Queue consumption failed after %d symbols: %s',
+        [TotalProcessed, E.Message]);
+    end;
+  end;
+end;
+
+initialization
+  TDatabaseBuilder.DefaultBatchSize := 100;
 
 end.
