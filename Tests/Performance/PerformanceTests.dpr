@@ -88,41 +88,46 @@ end;
   Target: Speedup >= 2x on multi-core systems
 
   Compares sequential vs parallel AST parsing time.
+  IMPORTANT: Each test needs fresh ParsedFiles - TParsedFile objects cannot be
+  reused after processing (parser references become invalid).
 }
 function TestParallelASTSpeedup: TTestResult;
 var
   Scanner: TFolderScanner;
   SeqProcessor: TASTProcessor;
   ParProcessor: TParallelASTProcessor;
-  ParsedFiles: TStringList;
+  SeqParsedFiles, ParParsedFiles: TStringList;
   SeqChunks, ParChunks: TCodeChunkList;
   SeqStopwatch, ParStopwatch: TStopwatch;
   SeqTimeMs, ParTimeMs: Int64;
   Speedup: Double;
   I: Integer;
+  FileCount: Integer;
 begin
   Result.TestName := 'ParallelAST_Speedup';
   Result.ExpectedMs := 0;  // No time threshold, measuring speedup ratio
 
-  ParsedFiles := nil;
+  SeqParsedFiles := nil;
+  ParParsedFiles := nil;
   SeqChunks := nil;
   ParChunks := nil;
-
-  // Scan folder
-  Scanner := TFolderScanner.Create(False);
-  try
-    ParsedFiles := Scanner.ScanFolder(TEST_FOLDER);
-    Log(Format('  Testing with %d files', [ParsedFiles.Count]));
-  finally
-    Scanner.Free;
-  end;
+  FileCount := 0;
 
   try
-    // Sequential processing
+    // Sequential processing - scan fresh files
+    Scanner := TFolderScanner.Create(False);
+    try
+      SeqParsedFiles := Scanner.ScanFolder(TEST_FOLDER);
+      FileCount := SeqParsedFiles.Count;
+      Log(Format('  Testing with %d files', [FileCount]));
+    finally
+      Scanner.Free;
+    end;
+
     SeqProcessor := TASTProcessor.Create;
     try
       SeqStopwatch := TStopwatch.StartNew;
-      SeqChunks := SeqProcessor.ProcessFiles(ParsedFiles);
+      SeqChunks := SeqProcessor.ProcessFiles(SeqParsedFiles);
       SeqStopwatch.Stop;
       SeqTimeMs := SeqStopwatch.ElapsedMilliseconds;
       Log(Format('  Sequential: %d ms (%d chunks)', [SeqTimeMs, SeqChunks.Count]));
@@ -130,14 +135,26 @@ begin
       SeqProcessor.Free;
     end;
 
-    // Parallel processing
+    // Free sequential files before parallel test
+    for I := 0 to SeqParsedFiles.Count - 1 do
+      SeqParsedFiles.Objects[I].Free;
+    FreeAndNil(SeqParsedFiles);
+
+    // Parallel processing - scan fresh files
+    Scanner := TFolderScanner.Create(False);
+    try
+      ParParsedFiles := Scanner.ScanFolder(TEST_FOLDER);
+    finally
+      Scanner.Free;
+    end;
+
     ParProcessor := TParallelASTProcessor.Create;
     try
       ParProcessor.ShowProgress := False;
       ParProcessor.MinFilesForParallel := 2;  // Force parallel even for few files
 
       ParStopwatch := TStopwatch.StartNew;
-      ParChunks := ParProcessor.ProcessFiles(ParsedFiles);
+      ParChunks := ParProcessor.ProcessFiles(ParParsedFiles);
       ParStopwatch.Stop;
       ParTimeMs := ParStopwatch.ElapsedMilliseconds;
       Log(Format('  Parallel: %d ms (%d chunks)', [ParTimeMs, ParChunks.Count]));
@@ -174,12 +191,18 @@ begin
     if Assigned(ParChunks) then
       ParChunks.Free;
 
-    // Free parsed files
-    if Assigned(ParsedFiles) then
+    // Free parsed files (if not already freed)
+    if Assigned(SeqParsedFiles) then
     begin
-      for I := 0 to ParsedFiles.Count - 1 do
-        ParsedFiles.Objects[I].Free;
-      ParsedFiles.Free;
+      for I := 0 to SeqParsedFiles.Count - 1 do
+        SeqParsedFiles.Objects[I].Free;
+      SeqParsedFiles.Free;
+    end;
+    if Assigned(ParParsedFiles) then
+    begin
+      for I := 0 to ParParsedFiles.Count - 1 do
+        ParParsedFiles.Objects[I].Free;
+      ParParsedFiles.Free;
     end;
   end;
 end;
