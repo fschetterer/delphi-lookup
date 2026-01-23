@@ -1782,13 +1782,28 @@ begin
       ChangeDetector.Free;
     end;
 
-    // If no changed files, we're done
+    // If no changed files, we're done - but update timestamp to record verification
     if ChangedFiles.Count = 0 then
     begin
+      // Update indexed_at to record that we verified this folder
+      var TouchQuery := TFDQuery.Create(nil);
+      try
+        TouchQuery.Connection := Connection;
+        TouchQuery.SQL.Text :=
+          'UPDATE indexed_folders SET indexed_at = :indexed_at WHERE folder_path = :folder_path';
+        TouchQuery.ParamByName('indexed_at').AsString := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+        TouchQuery.ParamByName('folder_path').AsString := FolderPath;
+        TouchQuery.ExecSQL;
+        Connection.Commit;
+      finally
+        TouchQuery.Free;
+      end;
+
       TotalStopwatch.Stop;
       WriteLn;
       WriteLn('=============================================');
       WriteLn('No changes detected. Index is up to date.');
+      WriteLn('Timestamp updated to record verification.');
       WriteLn(Format('Total time: %d ms', [TotalStopwatch.ElapsedMilliseconds]));
       Exit;
     end;

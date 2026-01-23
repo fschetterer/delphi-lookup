@@ -170,6 +170,10 @@ type
     procedure FinalizeFolder(const AFolderPath: string; AFilesCount, AChunksCount: Integer;
       AStartTime: TDateTime; AFilesModified: Integer);
 
+    /// <summary>Update indexed_at timestamp for a folder without reprocessing.
+    /// Use when verifying a folder has no changes but want to record the verification time.</summary>
+    procedure TouchFolderTimestamp(const AFolderPath: string);
+
     /// <summary>Get the database connection (for shared access)</summary>
     property Connection: TFDConnection read FConnection;
 
@@ -2497,6 +2501,19 @@ begin
   FQuery.ExecSQL;
 
   WriteLn(Format('  Folder finalized: %d files, %d chunks', [AFilesCount, AChunksCount]));
+end;
+
+procedure TDatabaseBuilder.TouchFolderTimestamp(const AFolderPath: string);
+begin
+  // Update only the indexed_at timestamp without changing other fields
+  FQuery.SQL.Text :=
+    'UPDATE indexed_folders SET indexed_at = :indexed_at WHERE folder_path = :folder_path';
+  FQuery.ParamByName('indexed_at').AsString := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+  FQuery.ParamByName('folder_path').AsString := AFolderPath;
+  FQuery.ExecSQL;
+
+  if FQuery.RowsAffected > 0 then
+    WriteLn(Format('  Timestamp updated for: %s', [AFolderPath]));
 end;
 
 { REQ-008: Parallel Results Queue Consumer }
