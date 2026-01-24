@@ -128,14 +128,16 @@ begin
       Query.SQL.Text := 'PRAGMA journal_mode=WAL';
       Query.ExecSQL;
 
-      // Generate query hash from query + all filters
+      // Generate query hash from query + all filters + search mode
       QueryHash := GenerateQueryHash(AQueryText, [
         ContentTypeFilter,
         SourceCategoryFilter,
         PreferCategory,
         DomainTagsFilter,
         SymbolTypeFilter,
-        FrameworkFilter
+        FrameworkFilter,
+        BoolToStr(UseSemanticSearch, True),
+        BoolToStr(UseReranker, True)
       ]);
 
       // === Update query_cache table (new table, if it exists) ===
@@ -929,13 +931,16 @@ begin
       WriteLn;
 
       // Try to load from cache first (BEFORE initializing QueryProcessor to avoid lock)
+      // Include search mode flags in hash to avoid mixing FTS5/semantic results
       var QueryHash := GenerateQueryHash(QueryText, [
         ContentTypeFilter,
         SourceCategoryFilter,
         PreferCategory,
         DomainTagsFilter,
         SymbolTypeFilter,
-        FrameworkFilter
+        FrameworkFilter,
+        BoolToStr(UseSemanticSearch, True),
+        BoolToStr(UseReranker, True)
       ]);
 
       // Start timing
