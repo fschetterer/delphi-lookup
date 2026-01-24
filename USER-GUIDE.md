@@ -5,7 +5,7 @@
 delphi-lookup is a **high-performance Pascal source code search system** for AI coding agents. It provides instant access to code definitions, examples, and documentation across large Pascal codebases.
 
 **Key Features:**
-- ⚡ **Sub-millisecond cached searches** (1-3ms for repeated queries)
+- ⚡ **Fast cached searches** (~100ms for repeated queries)
 - 🔍 **FTS5 search**: Exact match + fuzzy + full-text search
 - 📊 **Smart caching**: Automatic query logging and result caching
 - 🎯 **Category filtering**: Search user code, stdlib, or third-party separately
@@ -168,16 +168,17 @@ delphi-lookup uses **5-tier hybrid search** for optimal results:
 
 ## Performance
 
-### Search Speed
+### Search Speed (wall-clock time)
 
 **Cache Miss** (first query):
-- Simple queries: 200-400ms
-- Full-text queries: 1,500-2,000ms
+- FTS5 search: ~2.3s
 - With reranking: +100-150ms
 
 **Cache Hit** (repeated query):
-- **1-3ms** (500-2000x faster)
+- **~80-100ms** (~23x faster)
 - Automatic caching of all queries
+
+> Note: Internal cache lookup is ~6ms; exe startup adds ~80ms overhead.
 
 ### Indexing Speed
 
@@ -188,9 +189,8 @@ delphi-lookup uses **5-tier hybrid search** for optimal results:
 ### Scalability
 
 Successfully tested with:
-- **344,394 symbols** indexed
+- **482,545+ symbols** indexed
 - **16 folders** including full Delphi RTL/VCL
-- **621,245 code chunks** total
 - Database size: ~500MB
 
 ## Output Format

@@ -466,14 +466,14 @@ end;
 ```
 
 **Cache Flow:**
-1. Generate hash
-2. Look up in `query_log` WHERE `cache_valid = 1`
-3. If found: Load symbols by result_ids (1-3ms)
+1. Generate hash (includes query + filters + search mode)
+2. Look up in `query_cache` or `query_log` WHERE `cache_valid = 1`
+3. If found: Load symbols by result_ids (~6ms internal)
 4. If not found: Execute full search, store result_ids
 
-**Performance:**
-- Cache hit: **1-3ms** (100-2000x faster)
-- Cache miss: 200-2000ms (depends on query complexity)
+**Performance (wall-clock time):**
+- Cache hit: **~80-100ms** (~23x faster) - includes exe startup overhead
+- Cache miss: ~2.3s (FTS5 search)
 
 **Parallel Search:**
 

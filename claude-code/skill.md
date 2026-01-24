@@ -26,7 +26,7 @@ delphi-lookup.exe "ValidateInput" --symbol function -n 5
 
 ## Why Use This Instead of Grep
 
-- **Sub-millisecond cached searches** (1-3ms for repeated queries)
+- **Fast cached searches** (~100ms for repeated queries)
 - **AST-aware**: Understands Pascal syntax, not just text matching
 - **Category filtering**: Separate user code from stdlib from third-party
 - **Framework-aware**: VCL/FMX/RTL classification

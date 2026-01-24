@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**delphi-lookup** is a high-performance Pascal source code search system designed for AI coding agents. It provides sub-millisecond cached searches across large Pascal codebases using FTS5 full-text search.
+**delphi-lookup** is a high-performance Pascal source code search system designed for AI coding agents. It provides fast cached searches (~100ms) across large Pascal codebases using FTS5 full-text search.
 
 **Features:**
 - Fast search: exact name + fuzzy matching + FTS5 full-text
 - Framework-aware: VCL/FMX/RTL classification and filtering
 - Documentation indexing: Official Delphi CHM help files
-- Query caching: 1-3ms cache hits (100-2000x faster)
+- Query caching: ~100ms cache hits (~23x faster than uncached)
 - Incremental indexing: Only processes new/modified files
 
 > **Note on Vector/Semantic Search:** The codebase includes optional vector embeddings (via Ollama), but **FTS5-only is recommended** for AI agent workflows. Agents iterate fast and can achieve similar quality with multiple specific searches while being 17x faster. See "Vector Search Status" section for benchmark results.
@@ -293,10 +293,12 @@ delphi-indexer.exe "C:\...\source\vcl" --category stdlib --framework VCL
 - ~1,000 symbols in 25-30 seconds
 - Incremental: Only processes new/modified files
 
-**Searching:**
-- **Cache hit:** 1-3ms (repeated query)
-- **Cache miss:** 200-2000ms (first query)
+**Searching (wall-clock time, including exe startup):**
+- **Cache hit:** ~80-100ms (repeated query)
+- **Cache miss:** ~2.3s (first query, FTS5 search)
 - **With reranking:** +100-150ms
+
+> Note: Internal cache lookup is ~6ms, but exe startup adds ~80ms overhead.
 
 **Scalability:**
 - Tested with 482,545+ symbols

@@ -8,7 +8,7 @@ High-performance source code search system for Pascal codebases, optimized for A
 
 ## Features
 
-⚡ **Ultra-Fast** - 1-3ms cached searches (100-2000x faster than uncached)
+⚡ **Fast** - ~100ms cached searches (~23x faster than uncached)
 🔍 **FTS5 Search** - Exact + Fuzzy + Full-Text search
 📊 **Smart Caching** - Automatic query logging and result caching
 🎯 **Category Filtering** - Separate user code, stdlib, third-party
@@ -74,14 +74,17 @@ Pascal Source Files → delphi-indexer → SQLite Database (FTS5)
 
 ## Performance
 
+Wall-clock time (including exe startup overhead):
+
 | Operation | Speed | Details |
 |-----------|-------|---------|
-| **Cached search** | 1-3ms | Repeated queries |
-| **Simple search** | 200-400ms | First time |
-| **Full-text search** | 1,500-2,000ms | Complex queries |
+| **Cached search** | ~80-100ms | Repeated queries |
+| **Uncached search** | ~2.3s | First time (FTS5) |
 | **Indexing** | ~43 chunks/sec | ~1,000 symbols in 25-30s |
 
-**Scalability**: Tested with 344K+ symbols, full Delphi RTL/VCL indexed
+> Internal cache lookup is ~6ms; exe startup adds ~80ms overhead.
+
+**Scalability**: Tested with 482K+ symbols, full Delphi RTL/VCL indexed
 
 ## Examples
 
