@@ -68,6 +68,32 @@ begin
   Result := TPath.Combine(ExtractFilePath(ParamStr(0)), DEFAULT_DB_FILE);
 end;
 
+function HasContentHashColumn(AConnection: TFDConnection): Boolean;
+var
+  Query: TFDQuery;
+begin
+  // Check if content_hash column exists in symbols table (backwards compatibility)
+  Result := False;
+  Query := TFDQuery.Create(nil);
+  try
+    Query.Connection := AConnection;
+    Query.SQL.Text := 'PRAGMA table_info(symbols)';
+    Query.Open;
+    while not Query.EOF do
+    begin
+      if SameText(Query.FieldByName('name').AsString, 'content_hash') then
+      begin
+        Result := True;
+        Break;
+      end;
+      Query.Next;
+    end;
+    Query.Close;
+  finally
+    Query.Free;
+  end;
+end;
+
 function GenerateQueryHash(const AQuery: string; const AFilters: array of string): string;
 var
   I: Integer;
@@ -112,74 +138,82 @@ begin
         FrameworkFilter
       ]);
 
-      // === Update query_cache table (new table) ===
-      // Check if entry exists in query_cache
-      Query.SQL.Text := 'SELECT hit_count, avg_duration_ms FROM query_cache WHERE query_hash = :hash';
-      Query.ParamByName('hash').AsString := QueryHash;
+      // === Update query_cache table (new table, if it exists) ===
+      Query.SQL.Text := 'SELECT name FROM sqlite_master WHERE type=''table'' AND name=''query_cache''';
       Query.Open;
+      var HasQueryCache := not Query.EOF;
+      Query.Close;
 
-      if not Query.EOF then
+      if HasQueryCache then
       begin
-        // Entry exists - update it
-        ExistingHitCount := Query.FieldByName('hit_count').AsInteger;
-        ExistingAvgDuration := Query.FieldByName('avg_duration_ms').AsInteger;
-        Query.Close;
+        // Check if entry exists in query_cache
+        Query.SQL.Text := 'SELECT hit_count, avg_duration_ms FROM query_cache WHERE query_hash = :hash';
+        Query.ParamByName('hash').AsString := QueryHash;
+        Query.Open;
 
-        if ACacheHit then
+        if not Query.EOF then
         begin
-          // Cache hit - just update hit_count and last_seen
-          Query.SQL.Text :=
-            'UPDATE query_cache SET ' +
-            '  hit_count = :hit_count, ' +
-            '  last_seen = CURRENT_TIMESTAMP ' +
-            'WHERE query_hash = :hash';
-          Query.ParamByName('hit_count').AsInteger := ExistingHitCount + 1;
-          Query.ParamByName('hash').AsString := QueryHash;
+          // Entry exists - update it
+          ExistingHitCount := Query.FieldByName('hit_count').AsInteger;
+          ExistingAvgDuration := Query.FieldByName('avg_duration_ms').AsInteger;
+          Query.Close;
+
+          if ACacheHit then
+          begin
+            // Cache hit - just update hit_count and last_seen
+            Query.SQL.Text :=
+              'UPDATE query_cache SET ' +
+              '  hit_count = :hit_count, ' +
+              '  last_seen = CURRENT_TIMESTAMP ' +
+              'WHERE query_hash = :hash';
+            Query.ParamByName('hit_count').AsInteger := ExistingHitCount + 1;
+            Query.ParamByName('hash').AsString := QueryHash;
+          end
+          else
+          begin
+            // Cache miss - update everything (results may have changed after revalidation)
+            Query.SQL.Text :=
+              'UPDATE query_cache SET ' +
+              '  result_ids = :result_ids, ' +
+              '  result_count = :result_count, ' +
+              '  cache_valid = 1, ' +
+              '  hit_count = :hit_count, ' +
+              '  last_seen = CURRENT_TIMESTAMP, ' +
+              '  avg_duration_ms = :avg_duration ' +
+              'WHERE query_hash = :hash';
+            Query.ParamByName('result_ids').AsString := AResultIDs;
+            Query.ParamByName('result_count').AsInteger := AResultCount;
+            Query.ParamByName('hit_count').AsInteger := ExistingHitCount + 1;
+            // Running average
+            Query.ParamByName('avg_duration').AsInteger :=
+              (ExistingAvgDuration * ExistingHitCount + ADurationMs) div (ExistingHitCount + 1);
+            Query.ParamByName('hash').AsString := QueryHash;
+          end;
+
+          Query.ExecSQL;
         end
         else
         begin
-          // Cache miss - update everything (results may have changed after revalidation)
-          Query.SQL.Text :=
-            'UPDATE query_cache SET ' +
-            '  result_ids = :result_ids, ' +
-            '  result_count = :result_count, ' +
-            '  cache_valid = 1, ' +
-            '  hit_count = :hit_count, ' +
-            '  last_seen = CURRENT_TIMESTAMP, ' +
-            '  avg_duration_ms = :avg_duration ' +
-            'WHERE query_hash = :hash';
-          Query.ParamByName('result_ids').AsString := AResultIDs;
-          Query.ParamByName('result_count').AsInteger := AResultCount;
-          Query.ParamByName('hit_count').AsInteger := ExistingHitCount + 1;
-          // Running average
-          Query.ParamByName('avg_duration').AsInteger :=
-            (ExistingAvgDuration * ExistingHitCount + ADurationMs) div (ExistingHitCount + 1);
-          Query.ParamByName('hash').AsString := QueryHash;
-        end;
+          // Entry doesn't exist - insert new (only for cache misses)
+          Query.Close;
 
-        Query.ExecSQL;
-      end
-      else
-      begin
-        // Entry doesn't exist - insert new (only for cache misses)
-        Query.Close;
-
-        if not ACacheHit then
-        begin
-          Query.SQL.Text :=
-            'INSERT INTO query_cache (' +
-            '  query_hash, query_text, result_ids, result_count, cache_valid, ' +
-            '  hit_count, first_seen, last_seen, avg_duration_ms' +
-            ') VALUES (' +
-            '  :hash, :query_text, :result_ids, :result_count, 1, ' +
-            '  1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :avg_duration' +
-            ')';
-          Query.ParamByName('hash').AsString := QueryHash;
-          Query.ParamByName('query_text').AsString := AQueryText;
-          Query.ParamByName('result_ids').AsString := AResultIDs;
-          Query.ParamByName('result_count').AsInteger := AResultCount;
-          Query.ParamByName('avg_duration').AsInteger := ADurationMs;
-          Query.ExecSQL;
+          if not ACacheHit then
+          begin
+            Query.SQL.Text :=
+              'INSERT INTO query_cache (' +
+              '  query_hash, query_text, result_ids, result_count, cache_valid, ' +
+              '  hit_count, first_seen, last_seen, avg_duration_ms' +
+              ') VALUES (' +
+              '  :hash, :query_text, :result_ids, :result_count, 1, ' +
+              '  1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :avg_duration' +
+              ')';
+            Query.ParamByName('hash').AsString := QueryHash;
+            Query.ParamByName('query_text').AsString := AQueryText;
+            Query.ParamByName('result_ids').AsString := AResultIDs;
+            Query.ParamByName('result_count').AsInteger := AResultCount;
+            Query.ParamByName('avg_duration').AsInteger := ADurationMs;
+            Query.ExecSQL;
+          end;
         end;
       end;
 
@@ -295,6 +329,7 @@ var
   Connection: TFDConnection;
   Query: TFDQuery;
   ContentHash: string;
+  HasHashColumn: Boolean;
 begin
   // Format: "id:hash,id:hash,..." for cache validation
   IDList := TStringList.Create;
@@ -305,21 +340,27 @@ begin
     Connection.Open;
     Query.Connection := Connection;
 
+    // Check schema version once
+    HasHashColumn := HasContentHashColumn(Connection);
+
     for I := 0 to AResults.Count - 1 do
     begin
-      // Get content_hash for this symbol
-      Query.SQL.Text := 'SELECT content_hash FROM symbols WHERE id = :id';
-      Query.ParamByName('id').AsInteger := AResults[I].SymbolID;
-      Query.Open;
+      ContentHash := '';
 
-      if not Query.EOF then
-        ContentHash := Query.FieldByName('content_hash').AsString
-      else
-        ContentHash := '';
+      if HasHashColumn then
+      begin
+        // Get content_hash for this symbol (new schema)
+        Query.SQL.Text := 'SELECT content_hash FROM symbols WHERE id = :id';
+        Query.ParamByName('id').AsInteger := AResults[I].SymbolID;
+        Query.Open;
 
-      Query.Close;
+        if not Query.EOF then
+          ContentHash := Query.FieldByName('content_hash').AsString;
 
-      // Format: id:hash (hash may be empty for legacy data)
+        Query.Close;
+      end;
+
+      // Format: id:hash (hash may be empty for legacy schema)
       IDList.Add(IntToStr(AResults[I].SymbolID) + ':' + ContentHash);
     end;
 
@@ -344,6 +385,7 @@ var
   ColonPos: Integer;
   IDHashPair: string;
   CacheValid: Boolean;
+  HasHashColumn: Boolean;
 begin
   Result := nil;
 
@@ -360,63 +402,94 @@ begin
       Query.SQL.Text := 'PRAGMA journal_mode=WAL';
       Query.ExecSQL;
 
-      // Try to find a valid cache entry in query_cache (new table)
-      Query.SQL.Text :=
-        'SELECT result_ids, result_count FROM query_cache ' +
-        'WHERE query_hash = :hash AND cache_valid = 1';
-      Query.ParamByName('hash').AsString := AQueryHash;
+      // Check schema version once for backwards compatibility
+      HasHashColumn := HasContentHashColumn(Connection);
+
+      // Check if query_cache table exists (new schema)
+      Query.SQL.Text := 'SELECT name FROM sqlite_master WHERE type=''table'' AND name=''query_cache''';
       Query.Open;
+      var HasQueryCache := not Query.EOF;
+      Query.Close;
 
-      if not Query.EOF then
+      ResultIDs := '';
+
+      if HasQueryCache then
       begin
-        ResultIDs := Query.FieldByName('result_ids').AsString;
-        var CachedResultCount := Query.FieldByName('result_count').AsInteger;
-        Query.Close;
+        // New schema: Try query_cache first
+        Query.SQL.Text :=
+          'SELECT result_ids, result_count FROM query_cache ' +
+          'WHERE query_hash = :hash AND cache_valid = 1';
+        Query.ParamByName('hash').AsString := AQueryHash;
+        Query.Open;
 
-        // Handle "0 results" cache (empty result_ids but valid cache entry)
-        if (ResultIDs = '') and (CachedResultCount = 0) then
+        if not Query.EOF then
         begin
-          // Valid cache of zero results - return empty list
-          Result := TSearchResultList.Create;
-          Exit;
-        end;
+          ResultIDs := Query.FieldByName('result_ids').AsString;
+          var CachedResultCount := Query.FieldByName('result_count').AsInteger;
+          Query.Close;
 
-        if ResultIDs <> '' then
-        begin
-          // Parse id:hash format and validate each symbol
-          IDList := TStringList.Create;
-          try
-            IDList.CommaText := ResultIDs;
-            CacheValid := True;
-
+          // Handle "0 results" cache (empty result_ids but valid cache entry)
+          if (ResultIDs = '') and (CachedResultCount = 0) then
+          begin
             Result := TSearchResultList.Create;
+            Exit;
+          end;
+        end
+        else
+          Query.Close;
+      end
+      else
+      begin
+        // Legacy schema: Fallback to query_log
+        Query.SQL.Text :=
+          'SELECT result_ids FROM query_log ' +
+          'WHERE query_hash = :hash AND cache_valid = 1 ' +
+          'ORDER BY executed_at DESC LIMIT 1';
+        Query.ParamByName('hash').AsString := AQueryHash;
+        Query.Open;
 
-            for I := 0 to IDList.Count - 1 do
+        if not Query.EOF then
+          ResultIDs := Query.FieldByName('result_ids').AsString;
+
+        Query.Close;
+      end;
+
+      if ResultIDs <> '' then
+      begin
+        // Parse id:hash format and validate each symbol
+        IDList := TStringList.Create;
+        try
+          IDList.CommaText := ResultIDs;
+          CacheValid := True;
+
+          Result := TSearchResultList.Create;
+
+          for I := 0 to IDList.Count - 1 do
+          begin
+            IDHashPair := IDList[I];
+
+            // Parse "id:hash" format
+            ColonPos := Pos(':', IDHashPair);
+            if ColonPos > 0 then
             begin
-              IDHashPair := IDList[I];
+              SymbolID := StrToIntDef(Copy(IDHashPair, 1, ColonPos - 1), 0);
+              CachedHash := Copy(IDHashPair, ColonPos + 1, MaxInt);
+            end
+            else
+            begin
+              // Legacy format (just ID, no hash)
+              SymbolID := StrToIntDef(IDHashPair, 0);
+              CachedHash := '';
+            end;
 
-              // Parse "id:hash" format
-              ColonPos := Pos(':', IDHashPair);
-              if ColonPos > 0 then
-              begin
-                SymbolID := StrToIntDef(Copy(IDHashPair, 1, ColonPos - 1), 0);
-                CachedHash := Copy(IDHashPair, ColonPos + 1, MaxInt);
-              end
-              else
-              begin
-                // Legacy format (just ID, no hash)
-                SymbolID := StrToIntDef(IDHashPair, 0);
-                CachedHash := '';
-              end;
-
-              if SymbolID = 0 then
-              begin
-                CacheValid := False;
-                Break;
-              end;
+            if SymbolID = 0 then
+            begin
+              CacheValid := False;
+              Break;
+            end;
 
               // Load symbol and validate hash
-              Query.SQL.Text := 'SELECT *, content_hash FROM symbols WHERE id = :id';
+              Query.SQL.Text := 'SELECT * FROM symbols WHERE id = :id';
               Query.ParamByName('id').AsInteger := SymbolID;
               Query.Open;
 
@@ -428,14 +501,17 @@ begin
                 Break;
               end;
 
-              // Validate content hash (if we have one)
-              CurrentHash := Query.FieldByName('content_hash').AsString;
-              if (CachedHash <> '') and (CurrentHash <> '') and (CachedHash <> CurrentHash) then
+              // Validate content hash (if we have one and schema supports it)
+              if HasHashColumn then
               begin
-                // Content has changed - invalidate cache
-                CacheValid := False;
-                Query.Close;
-                Break;
+                CurrentHash := Query.FieldByName('content_hash').AsString;
+                if (CachedHash <> '') and (CurrentHash <> '') and (CachedHash <> CurrentHash) then
+                begin
+                  // Content has changed - invalidate cache
+                  CacheValid := False;
+                  Query.Close;
+                  Break;
+                end;
               end;
 
               // Hash valid (or not available) - load symbol
@@ -464,8 +540,11 @@ begin
             begin
               FreeAndNil(Result);
 
-              // Invalidate this specific cache entry
-              Query.SQL.Text := 'UPDATE query_cache SET cache_valid = 0 WHERE query_hash = :hash';
+              // Invalidate this specific cache entry (in appropriate table)
+              if HasQueryCache then
+                Query.SQL.Text := 'UPDATE query_cache SET cache_valid = 0 WHERE query_hash = :hash'
+              else
+                Query.SQL.Text := 'UPDATE query_log SET cache_valid = 0 WHERE query_hash = :hash';
               Query.ParamByName('hash').AsString := AQueryHash;
               Query.ExecSQL;
             end;
@@ -474,9 +553,6 @@ begin
             IDList.Free;
           end;
         end;
-      end
-      else
-        Query.Close;
 
     finally
       Query.Free;
@@ -849,47 +925,10 @@ begin
         Halt(1);
       end;
 
-      // Initialize search components
-      QueryProcessor.Initialize(DatabaseFile);
-
-      // Apply filters to QueryProcessor
-      QueryProcessor.ContentTypeFilter := ContentTypeFilter;
-      QueryProcessor.SourceCategoryFilter := SourceCategoryFilter;
-      QueryProcessor.PreferCategory := PreferCategory;
-      QueryProcessor.DomainTagsFilter := DomainTagsFilter;
-      QueryProcessor.SymbolTypeFilter := SymbolTypeFilter;
-      QueryProcessor.FrameworkFilter := FrameworkFilter;
-
-      // Initialize vector search (only if enabled)
-      if UseSemanticSearch then
-      begin
-        WriteLn('WARNING: Semantic search enabled - results may have low precision (~40%).');
-        WriteLn('         Traditional name matching is more accurate for this codebase.');
-        WriteLn;
-
-        // Load vec0 extension on QueryProcessor's connection
-        WriteLn('Loading sqlite-vec extension for vector search...');
-        TDatabaseConnectionHelper.LoadVec0Extension(QueryProcessor.Connection);
-        WriteLn('sqlite-vec extension loaded successfully');
-
-        // Use QueryProcessor's connection to avoid "schema locked" error
-        VectorSearch := TVectorSearch.Create(QueryProcessor.Connection);
-        try
-          VectorSearch.Initialize(DatabaseFile, EmbeddingURL);
-        except
-          on E: Exception do
-          begin
-            WriteLn(Format('Warning: Vector search initialization failed: %s', [E.Message]));
-            WriteLn('Continuing with symbolic search only...');
-            FreeAndNil(VectorSearch);  // Ensure it's nil if initialization failed
-          end;
-        end;
-      end;
-
       WriteLn(Format('// Context for query: "%s"', [QueryText]));
       WriteLn;
 
-      // Try to load from cache first
+      // Try to load from cache first (BEFORE initializing QueryProcessor to avoid lock)
       var QueryHash := GenerateQueryHash(QueryText, [
         ContentTypeFilter,
         SourceCategoryFilter,
@@ -906,7 +945,7 @@ begin
 
       if Assigned(SearchResults) then
       begin
-        // Cache hit
+        // Cache hit - no need to initialize QueryProcessor
         IsCacheHit := True;
         Stopwatch.Stop;
         WriteLn(Format('// [CACHE HIT] Loaded %d results from cache in %d ms',
@@ -915,8 +954,44 @@ begin
       end
       else
       begin
-        // Cache miss - perform full search
+        // Cache miss - initialize QueryProcessor and perform full search
         IsCacheHit := False;
+
+        QueryProcessor.Initialize(DatabaseFile);
+
+        // Apply filters to QueryProcessor
+        QueryProcessor.ContentTypeFilter := ContentTypeFilter;
+        QueryProcessor.SourceCategoryFilter := SourceCategoryFilter;
+        QueryProcessor.PreferCategory := PreferCategory;
+        QueryProcessor.DomainTagsFilter := DomainTagsFilter;
+        QueryProcessor.SymbolTypeFilter := SymbolTypeFilter;
+        QueryProcessor.FrameworkFilter := FrameworkFilter;
+
+        // Initialize vector search (only if enabled)
+        if UseSemanticSearch then
+        begin
+          WriteLn('WARNING: Semantic search enabled - results may have low precision (~40%).');
+          WriteLn('         Traditional name matching is more accurate for this codebase.');
+          WriteLn;
+
+          // Load vec0 extension on QueryProcessor's connection
+          WriteLn('Loading sqlite-vec extension for vector search...');
+          TDatabaseConnectionHelper.LoadVec0Extension(QueryProcessor.Connection);
+          WriteLn('sqlite-vec extension loaded successfully');
+
+          // Use QueryProcessor's connection to avoid "schema locked" error
+          VectorSearch := TVectorSearch.Create(QueryProcessor.Connection);
+          try
+            VectorSearch.Initialize(DatabaseFile, EmbeddingURL);
+          except
+            on E: Exception do
+            begin
+              WriteLn(Format('Warning: Vector search initialization failed: %s', [E.Message]));
+              WriteLn('Continuing with symbolic search only...');
+              FreeAndNil(VectorSearch);  // Ensure it's nil if initialization failed
+            end;
+          end;
+        end;
 
         // Perform search (with or without reranking)
         if UseReranker then
