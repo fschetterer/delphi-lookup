@@ -114,6 +114,7 @@ type
     procedure DirectiveInline; override;
     procedure DispInterfaceForward; override;
     procedure DotOp; override;
+    procedure ElseExpression; override;
     procedure ElseStatement; override;
     procedure EmptyStatement; override;
     procedure EnumeratedType; override;
@@ -142,6 +143,7 @@ type
     procedure FunctionMethodName; override;
     procedure FunctionProcedureName; override;
     procedure GotoStatement; override;
+    procedure TernaryOp; override;
     procedure IfStatement; override;
     procedure Identifier; override;
     procedure ImplementationSection; override;
@@ -157,11 +159,13 @@ type
     procedure InterfaceGUID; override;
     procedure InterfaceSection; override;
     procedure InterfaceType; override;
+    procedure IsNotOp; override;
     procedure LabelId; override;
     procedure MainUsesClause; override;
     procedure MainUsedUnitStatement; override;
     procedure MethodKind; override;
     procedure MultiplicativeOperator; override;
+    procedure NotInOp; override;
     procedure NotOp; override;
     procedure NilToken; override;
     procedure Number; override;
@@ -203,6 +207,7 @@ type
     procedure StringStatement; override;
     procedure StructuredType; override;
     procedure SubrangeType; override;
+    procedure ThenExpression; override;
     procedure ThenStatement; override;
     procedure TryStatement; override;
     procedure TypeArgs; override;
@@ -304,6 +309,7 @@ end;
 
 procedure AssignLexerPositionToNode(const Lexer: TPasLexer; const Node: TSyntaxNode);
 begin
+  Node.LineSeq := Lexer.PosXY.LineSeq;
   Node.Col := Lexer.PosXY.X;
   Node.Line := Lexer.PosXY.Y;
   Node.FileName := Lexer.FileName;
@@ -572,9 +578,10 @@ var
 
   NodeList: TList<TSyntaxNode>;
   Node: TSyntaxNode;
-  Col, Line: Integer;
+  Col, Line, LineSeq: Integer;
   FileName: string;
 begin
+  LineSeq := Lexer.PosXY.LineSeq;
   Line := Lexer.PosXY.Y;
   Col := Lexer.PosXY.X;
   FileName := Lexer.FileName;
@@ -592,6 +599,7 @@ begin
     begin
       ExprNode := FStack.Push(ntExpression);
       try
+        ExprNode.LineSeq := LineSeq;
         ExprNode.Line := Line;
         ExprNode.Col := Col;
         ExprNode.FileName := FileName;
@@ -1155,6 +1163,16 @@ begin
   inherited;
 end;
 
+procedure TPasSyntaxTreeBuilder.ElseExpression;
+begin
+  FStack.Push(ntElse);
+  try
+    inherited;
+  finally
+    FStack.Pop;
+  end;
+end;
+
 procedure TPasSyntaxTreeBuilder.ElseStatement;
 begin
   FStack.Push(ntElse);
@@ -1491,6 +1509,16 @@ begin
   inherited;
 end;
 
+procedure TPasSyntaxTreeBuilder.TernaryOp;
+begin
+  FStack.Push(ntTernaryOp);
+  try
+    inherited;
+  finally
+    FStack.Pop;
+  end;
+end;
+
 procedure TPasSyntaxTreeBuilder.IfStatement;
 begin
   FStack.Push(ntIf);
@@ -1650,6 +1678,12 @@ begin
   end;
 end;
 
+procedure TPasSyntaxTreeBuilder.IsNotOp;
+begin
+  FStack.AddChild(ntIsNot);
+  inherited;
+end;
+
 procedure TPasSyntaxTreeBuilder.LabelId;
 begin
   FStack.AddValuedChild(ntLabel, Lexer.Token);
@@ -1749,6 +1783,12 @@ end;
 procedure TPasSyntaxTreeBuilder.NilToken;
 begin
   FStack.AddChild(ntLiteral).SetAttribute(anType, AttributeValues[atNil]);
+  inherited;
+end;
+
+procedure TPasSyntaxTreeBuilder.NotInOp;
+begin
+  FStack.AddChild(ntNotIn);
   inherited;
 end;
 
@@ -2133,7 +2173,9 @@ var
   I, AssignIdx: Integer;
   Position: TTokenPoint;
   FileName: string;
+  LineSeq: Integer;
 begin
+  LineSeq := Lexer.PosXY.LineSeq;
   Position := Lexer.PosXY;
   FileName := Lexer.FileName;
 
@@ -2153,6 +2195,7 @@ begin
     begin
       Temp := FStack.Push(ntAssign);
       try
+        Temp.LineSeq := LineSeq;
         Temp.Col := Position.X;
         Temp.Line := Position.Y;
         Temp.FileName := FileName;
@@ -2304,6 +2347,16 @@ end;
 procedure TPasSyntaxTreeBuilder.SubrangeType;
 begin
   FStack.Push(ntType).SetAttribute(anName, AttributeValues[atSubRange]);
+  try
+    inherited;
+  finally
+    FStack.Pop;
+  end;
+end;
+
+procedure TPasSyntaxTreeBuilder.ThenExpression;
+begin
+  FStack.Push(ntThen);
   try
     inherited;
   finally
@@ -2517,7 +2570,9 @@ var
   NamesNode, UnitNode: TSyntaxNode;
   Position: TTokenPoint;
   FileName: string;
+  LineSeq: Integer;
 begin
+  LineSeq := Lexer.PosXY.LineSeq;
   Position := Lexer.PosXY;
   FileName := Lexer.FileName;
 
@@ -2535,6 +2590,7 @@ begin
     UnitNode.Col  := Position.X;
     UnitNode.Line := Position.Y;
     UnitNode.FileName := FileName;
+    UnitNode.LineSeq := LineSeq;
   finally
     NamesNode.Free;
   end;

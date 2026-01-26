@@ -32,7 +32,7 @@ uses
   {$ENDIF}
   DelphiAST.Consts;
 
-{$I .\DelphiAST\Source\SimpleParser\SimpleParser.inc}
+{$I SimpleParser.inc}
 {$IFDEF D18_NEWER}
   {$ZEROBASEDSTRINGS OFF}
 {$ENDIF}
@@ -83,6 +83,8 @@ class procedure TSyntaxTreeWriter.NodeToXML(const Builder: TStringBuilder;
       Builder.Append(Indent);
     end;
     Builder.Append('<' + UpperCase(SyntaxNodeNames[Node.Typ]));
+
+    Builder.Append('  line_seq="' + IntToStr(Node.LineSeq) + '"');
 
     if Node is TCompoundSyntaxNode then
     begin
