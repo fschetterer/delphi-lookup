@@ -29,6 +29,7 @@ type
     FFramework: string;
     FStartLine: Integer;
     FEndLine: Integer;
+    FIsDeclaration: Boolean;
   public
     constructor Create;
 
@@ -50,6 +51,7 @@ type
     property Framework: string read FFramework write FFramework;
     property StartLine: Integer read FStartLine write FStartLine;
     property EndLine: Integer read FEndLine write FEndLine;
+    property IsDeclaration: Boolean read FIsDeclaration write FIsDeclaration;
   end;
 
   TSearchResultList = class(TObjectList<TSearchResult>)
@@ -82,6 +84,11 @@ begin
       if Left.IsExactMatch and not Right.IsExactMatch then
         Result := -1
       else if Right.IsExactMatch and not Left.IsExactMatch then
+        Result := 1
+      // Declarations before implementations
+      else if Left.IsDeclaration and not Right.IsDeclaration then
+        Result := -1
+      else if Right.IsDeclaration and not Left.IsDeclaration then
         Result := 1
       else
       begin

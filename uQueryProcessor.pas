@@ -254,6 +254,8 @@ begin
       Result.StartLine := FQuery.FieldByName('start_line').AsInteger;
     if FQuery.FindField('end_line') <> nil then
       Result.EndLine := FQuery.FieldByName('end_line').AsInteger;
+    if FQuery.FindField('is_declaration') <> nil then
+      Result.IsDeclaration := FQuery.FieldByName('is_declaration').AsInteger = 1;
   except
     // Ignore if optional fields don't exist (old database)
   end;
@@ -274,7 +276,7 @@ begin
   CleanQuery := SanitizeQuery(AQuery);
   
   try
-    // Try exact name match first
+    // Try exact name match first (prefer declarations over implementations)
     FQuery.SQL.Text :=
       'SELECT * FROM symbols ' +
       'WHERE UPPER(name) = UPPER(:query) ' +
@@ -286,7 +288,8 @@ begin
       '    WHEN ''function'' THEN 3 ' +
       '    WHEN ''procedure'' THEN 4 ' +
       '    ELSE 5 ' +
-      '  END ' +
+      '  END, ' +
+      '  is_declaration DESC ' +
       'LIMIT 1';
     FQuery.ParamByName('query').AsString := CleanQuery;
     FQuery.Open;

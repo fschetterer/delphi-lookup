@@ -558,6 +558,7 @@ begin
         delphi_version TEXT,
         introduced_version TEXT,
         deprecated_version TEXT,
+        is_declaration INTEGER DEFAULT 0,
         is_inherited INTEGER DEFAULT 0,
         inherited_from TEXT,
         content_hash TEXT,
@@ -1221,11 +1222,13 @@ begin
       INSERT OR REPLACE INTO symbols (
         name, full_name, type, file_path, content, comments,
         parent_class, content_type, source_category,
-        framework, platforms, delphi_version, content_hash
+        framework, platforms, delphi_version,
+        is_declaration, content_hash
       ) VALUES (
         :name, :full_name, :type, :file_path, :content, :comments,
         :parent_class, :content_type, :source_category,
-        :framework, :platforms, :delphi_version, :content_hash
+        :framework, :platforms, :delphi_version,
+        :is_declaration, :content_hash
       )
     ''';
 
@@ -1266,6 +1269,9 @@ begin
       FQuery.ParamByName('delphi_version').DataType := ftString;
       FQuery.ParamByName('delphi_version').Clear;
     end;
+
+    // CHM/documentation entries are always declarations
+    FQuery.ParamByName('is_declaration').AsInteger := 1;
 
     // Set content hash for cache validation
     FQuery.ParamByName('content_hash').AsString := ContentHash;
@@ -1376,12 +1382,14 @@ begin
         name, full_name, type, file_path, content, enriched_text,
         spanish_terms, domain_tags, comments,
         parent_class, implemented_interfaces, visibility,
-        start_line, end_line, content_type, source_category, framework, content_hash
+        start_line, end_line, content_type, source_category, framework,
+        is_declaration, content_hash
       ) VALUES (
         :name, :full_name, :type, :file_path, :content, :enriched_text,
         :spanish_terms, :domain_tags, :comments,
         :parent_class, :implemented_interfaces, :visibility,
-        :start_line, :end_line, :content_type, :source_category, :framework, :content_hash
+        :start_line, :end_line, :content_type, :source_category, :framework,
+        :is_declaration, :content_hash
       )
     ''';
 
@@ -1411,6 +1419,9 @@ begin
       FQuery.ParamByName('framework').DataType := ftString;
       FQuery.ParamByName('framework').Clear;
     end;
+
+    // Set declaration flag
+    FQuery.ParamByName('is_declaration').AsInteger := Ord(AChunk.IsDeclaration);
 
     // Set content hash for cache validation
     FQuery.ParamByName('content_hash').AsString := ContentHash;
@@ -2047,6 +2058,15 @@ begin
   else
     WriteLn('Schema already migrated (framework column exists)');
 
+  // Migrate is_declaration column (for declaration vs implementation ranking)
+  if not ColumnExists('symbols', 'is_declaration') then
+  begin
+    WriteLn('Adding is_declaration column to symbols table...');
+    FQuery.SQL.Text := 'ALTER TABLE symbols ADD COLUMN is_declaration INTEGER DEFAULT 0';
+    FQuery.ExecSQL;
+    WriteLn('is_declaration column added');
+  end;
+
   // Migrate content_hash column (for cache validation)
   if not ColumnExists('symbols', 'content_hash') then
   begin
@@ -2551,11 +2571,13 @@ begin
         INSERT OR REPLACE INTO symbols (
           name, full_name, type, file_path, content, enriched_text,
           comments, parent_class, implemented_interfaces, visibility,
-          start_line, end_line, content_type, source_category, framework, content_hash
+          start_line, end_line, content_type, source_category, framework,
+          is_declaration, content_hash
         ) VALUES (
           :name, :full_name, :type, :file_path, :content, :enriched_text,
           :comments, :parent_class, :implemented_interfaces, :visibility,
-          :start_line, :end_line, :content_type, :source_category, :framework, :content_hash
+          :start_line, :end_line, :content_type, :source_category, :framework,
+          :is_declaration, :content_hash
         )
       ''';
 
@@ -2583,6 +2605,7 @@ begin
         FQuery.ParamByName('framework').Clear;
       end;
 
+      FQuery.ParamByName('is_declaration').AsInteger := Ord(Symbol.IsDeclaration);
       FQuery.ParamByName('content_hash').AsString := ContentHash;
       FQuery.ExecSQL;
 

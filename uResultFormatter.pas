@@ -385,6 +385,13 @@ begin
     MatchTypeText := MatchTypeText + ' - ' + CategoryLabel;
   end;
 
+  // Add declaration/implementation badge for method types
+  if AResult.IsDeclaration then
+    MatchTypeText := MatchTypeText + ' [Declaration]'
+  else if (AResult.SymbolType = 'function') or (AResult.SymbolType = 'procedure')
+       or (AResult.SymbolType = 'constructor') or (AResult.SymbolType = 'destructor') then
+    MatchTypeText := MatchTypeText + ' [Impl]';
+
   // Format the header
   WriteLn(Format('// Result %d (%s): %s', [AIndex, MatchTypeText, FormatSymbolSignature(AResult)]));
 
