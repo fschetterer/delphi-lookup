@@ -8,11 +8,15 @@ High-performance source code search system for Pascal codebases, optimized for A
 
 ## Features
 
-⚡ **Fast** - ~100ms cached searches (~23x faster than uncached)
-🔍 **FTS5 Search** - Exact + Fuzzy + Full-Text search
-📊 **Smart Caching** - Automatic query logging and result caching
-🎯 **Category Filtering** - Separate user code, stdlib, third-party
-📈 **Scalable** - Handles 300K+ symbols efficiently
+- **Fast** - ~100ms cached searches (~23x faster than uncached)
+- **FTS5 Search** - Exact + Fuzzy + Full-Text search
+- **Declaration Priority** - Declarations rank above implementations with `[Declaration]`/`[Impl]` badges
+- **Smart Caching** - Content-hash based cache that survives reindexing
+- **Incremental Indexing** - Merkle-style change detection; no-change verification in <10ms
+- **Parallel Processing** - Multi-threaded AST parsing and folder scanning
+- **Category Filtering** - Separate user code, stdlib, third-party
+- **Framework Detection** - Multi-tier VCL/FMX/RTL classification (packages, uses clause, path)
+- **Scalable** - Handles 480K+ symbols efficiently
 
 ## Quick Start
 
@@ -38,12 +42,14 @@ delphi-indexer.exe --list-folders
 
 **For using the tools:**
 - **[USER-GUIDE.md](USER-GUIDE.md)** - Complete usage guide, all options, examples
+- **[CLAUDE.md](CLAUDE.md)** - AI agent reference (configuration, architecture, code patterns)
 
 **For maintaining/extending:**
 - **[TECHNICAL-GUIDE.md](TECHNICAL-GUIDE.md)** - Architecture, troubleshooting, extending
 - **[DATABASE-SCHEMA.md](DATABASE-SCHEMA.md)** - Database schema reference
 - **[QUERY-ANALYTICS.md](QUERY-ANALYTICS.md)** - SQL queries for usage analysis
 - **[TESTS.md](TESTS.md)** - Testing guide and test suite
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history
 
 ## Architecture
 
@@ -54,9 +60,9 @@ Pascal Source Files → delphi-indexer → SQLite Database (FTS5)
 ```
 
 **Components:**
-- **delphi-indexer** - Indexes Pascal code with AST parsing
-- **delphi-lookup** - Fast FTS5 search with automatic caching
-- **Database** - SQLite with FTS5 full-text search
+- **delphi-indexer** - Indexes Pascal code with AST parsing (parallel, incremental)
+- **delphi-lookup** - Fast hybrid search (exact + fuzzy + FTS5) with caching
+- **Database** - SQLite with WAL mode, FTS5 full-text search, optional vector embeddings
 
 ## System Requirements
 
@@ -64,8 +70,9 @@ Pascal Source Files → delphi-indexer → SQLite Database (FTS5)
 
 **Runtime Dependencies:**
 - `sqlite3.dll` (FTS5-enabled, included)
+- `vec0.dll` (sqlite-vec extension, included)
 
-> **Note:** The codebase includes experimental vector embedding support (via Ollama), but this is not recommended for AI agent workflows. FTS5-only search is the default and recommended mode. See CLAUDE.md for details.
+> **Note:** Vector embedding support (via Ollama) is included but not recommended for AI agent workflows. FTS5-only is the default and recommended mode — agents iterate fast and achieve similar quality with multiple searches while being 17x faster. See CLAUDE.md for details.
 
 **Compilation Dependencies** (Delphi):
 - mORMot 2
@@ -80,11 +87,12 @@ Wall-clock time (including exe startup overhead):
 |-----------|-------|---------|
 | **Cached search** | ~80-100ms | Repeated queries |
 | **Uncached search** | ~2.3s | First time (FTS5) |
-| **Indexing** | ~43 chunks/sec | ~1,000 symbols in 25-30s |
+| **No-change reindex** | ~10ms | Merkle-style detection |
+| **Indexing** | ~43 chunks/sec | Parallel AST parsing |
 
 > Internal cache lookup is ~6ms; exe startup adds ~80ms overhead.
 
-**Scalability**: Tested with 482K+ symbols, full Delphi RTL/VCL indexed
+**Scalability**: Tested with 482K+ symbols, ~500MB database
 
 ## Examples
 
@@ -98,14 +106,19 @@ delphi-lookup.exe "TCustomForm" --category user
 # Boost user code in results
 delphi-lookup.exe "TForm" --prefer user -n 10
 
+# Filter by framework
+delphi-lookup.exe "TButton" --framework VCL -n 5
+
 # Full-text search
 delphi-lookup.exe "JSON serialization" -n 5
 
 # Find constants
 delphi-lookup.exe "MAX_BUFFER" --symbol const
 
-# List indexed folders
-delphi-indexer.exe --list-folders
+# Indexing
+delphi-indexer.exe "C:\Projects\MyLib" --category user
+delphi-indexer.exe "C:\Projects\MyLib" --force        # Full reindex
+delphi-indexer.exe --list-folders                      # Show indexed folders
 ```
 
 ## Output Format
@@ -116,9 +129,10 @@ Results formatted for AI agent consumption:
 // Context for query: "TStringList"
 // Found 3 result(s)
 
-// Result 1 (Exact Match - STDLIB): TStringList (type)
+// Result 1 (Exact Match - STDLIB [Declaration]): TStringList (type)
 // File: System.Classes.pas
-// Type: code | Category: stdlib
+// Unit: System.Classes
+// Type: code | Category: stdlib | Framework: RTL
 // Relevance: 1.00
 
 TStringList = class(TStrings)
@@ -127,6 +141,8 @@ TStringList = class(TStrings)
     ...
 end;
 ```
+
+Declarations are prioritized and tagged with `[Declaration]`. Method implementations show `[Impl]`.
 
 ## Configuration
 
