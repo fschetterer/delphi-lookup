@@ -5,6 +5,15 @@ All notable changes to delphi-lookup will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Declaration Priority in Search Results**: Declarations now rank above implementations
+  - New `is_declaration` column in `symbols` table (auto-migrated for existing databases)
+  - Persisted from AST processor through all insert paths (single, chunk, batch)
+  - `SortByRelevance` ranks declarations above implementations at same score
+  - `PerformExactSearch` uses `ORDER BY is_declaration DESC` to prefer declarations
+  - Result formatter shows `[Declaration]` or `[Impl]` badge in output header
+  - Re-index with `--force` required to populate the column for existing data
+
+### Added
 - **Parallel Processing for Indexing**: Major performance improvements for delphi-indexer
   - `TParallelFolderScanner`: 8x speedup on folder scanning using `TParallel.For`
   - `TParallelASTProcessor`: Worker pool with one parser per thread (3x+ speedup)
