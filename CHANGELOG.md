@@ -2,7 +2,7 @@
 
 All notable changes to delphi-lookup will be documented in this file.
 
-## [Unreleased]
+## [1.1.0] - 2026-02-10
 
 ### Added
 - **Declaration Priority in Search Results**: Declarations now rank above implementations

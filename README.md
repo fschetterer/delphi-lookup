@@ -215,6 +215,6 @@ Third-party licenses are documented in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LIC
 
 ---
 
-**Version**: 1.0
+**Version**: 1.1.0 (2026-02-10)
 **Target**: AI Coding Agents (Claude Code, Cursor, etc.)
 **Platform**: Windows x64

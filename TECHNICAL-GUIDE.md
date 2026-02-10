@@ -855,5 +855,5 @@ else
 
 ---
 
-**Version**: 1.0
+**Version**: 1.1.0
 **Target**: AI Coding Agents (maintenance, extension, troubleshooting)

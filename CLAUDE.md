@@ -469,6 +469,6 @@ QueryHash := GenerateQueryHash(Query, [Filters...]);
 
 ---
 
-**Version:** 1.0
+**Version:** 1.1.0
 **Target:** AI Coding Agents (Claude Code, etc.)
 **Status:** Production-ready

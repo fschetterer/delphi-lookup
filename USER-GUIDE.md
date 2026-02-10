@@ -366,6 +366,6 @@ delphi-lookup.exe "TForm" --category user -n 3
 
 ---
 
-**Version**: 1.0
+**Version**: 1.1.0
 **Platform**: Windows x64
 **Target**: AI Coding Agents (Claude Code, etc.)

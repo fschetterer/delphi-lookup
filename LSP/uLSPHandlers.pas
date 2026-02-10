@@ -236,7 +236,7 @@ begin
 
   ServerInfo := TJSONObject.Create;
   ServerInfo.AddPair('name', 'delphi-lsp-server');
-  ServerInfo.AddPair('version', '1.0.0');
+  ServerInfo.AddPair('version', '1.1.0');
 
   Result := TJSONObject.Create;
   TJSONObject(Result).AddPair('capabilities', Capabilities);
