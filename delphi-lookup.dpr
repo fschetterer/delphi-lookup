@@ -2,9 +2,12 @@
 
 {$APPTYPE CONSOLE}
 
-// This application requires 64-bit compilation for sqlite-vec compatibility
+// This application requires 64-bit Release compilation
 {$IFNDEF WIN64}
   {$MESSAGE FATAL 'delphi-lookup requires Win64 compilation. The sqlite-vec extension only works with 64-bit SQLite.'}
+{$ENDIF}
+{$IFDEF DEBUG}
+  {$MESSAGE FATAL 'delphi-lookup must be compiled in Release mode.'}
 {$ENDIF}
 
 {$R *.res}
