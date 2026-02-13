@@ -1140,11 +1140,12 @@ begin
       ResultFormatter.Free;
 
       // Log query AFTER closing connections (to avoid lock conflicts)
-      LogQuery(DatabaseFile, QueryText, SearchResults.Count, SearchDurationMs,
-        ExtractResultIDsWithHash(SearchResults, DatabaseFile), IsCacheHit);
-
       if Assigned(SearchResults) then
+      begin
+        LogQuery(DatabaseFile, QueryText, SearchResults.Count, SearchDurationMs,
+          ExtractResultIDsWithHash(SearchResults, DatabaseFile), IsCacheHit);
         SearchResults.Free;
+      end;
     end;
 
   except
@@ -1167,4 +1168,4 @@ begin
       Halt(1);
     end;
   end;
-end.
+end.\r
