@@ -27,6 +27,7 @@ type
     FDomainTagsFilter: string;
     FSymbolTypeFilter: string;
     FFrameworkFilter: string;
+    FHasIsDeclaration: Boolean;
 
     function BuildFilterClause: string;
     function ApplyPreferenceBoost(AResult: TSearchResult): TSearchResult;
@@ -122,6 +123,21 @@ begin
     // Enable WAL mode for concurrent access
     FQuery.SQL.Text := 'PRAGMA journal_mode=WAL';
     FQuery.ExecSQL;
+
+    // Detect if is_declaration column exists (added in v1.1.0)
+    FQuery.SQL.Text := 'PRAGMA table_info(symbols)';
+    FQuery.Open;
+    FHasIsDeclaration := False;
+    while not FQuery.EOF do
+    begin
+      if SameText(FQuery.FieldByName('name').AsString, 'is_declaration') then
+      begin
+        FHasIsDeclaration := True;
+        Break;
+      end;
+      FQuery.Next;
+    end;
+    FQuery.Close;
 
     FIsInitialized := True;
 
@@ -288,9 +304,9 @@ begin
       '    WHEN ''function'' THEN 3 ' +
       '    WHEN ''procedure'' THEN 4 ' +
       '    ELSE 5 ' +
-      '  END, ' +
-      '  is_declaration DESC ' +
-      'LIMIT 1';
+      '  END' +
+      IfThen(FHasIsDeclaration, ', is_declaration DESC ') +
+      ' LIMIT 1';
     FQuery.ParamByName('query').AsString := CleanQuery;
     FQuery.Open;
     
