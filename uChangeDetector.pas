@@ -43,6 +43,7 @@ uses
   System.Classes,
   System.IOUtils,
   System.Hash,
+  System.DateUtils,
   System.Generics.Collections,
   System.Generics.Defaults,
   FireDAC.Comp.Client;
@@ -415,11 +416,12 @@ begin
       begin
         if not ShouldExcludeFile(FilePath) then
         begin
-          // For folder hash, we use file name + last modified timestamp (as ticks)
+          // For folder hash, we use file name + last modified timestamp (Unix seconds)
+          // DateTimeToUnix gives 1-second precision (vs DateTimeToFileDate's 2-second DOS precision)
           // This is faster than content hash and sufficient for change detection
           // The actual content hash is checked later for individual files
           FileHash := ExtractFileName(FilePath) + ':' +
-            IntToStr(DateTimeToFileDate(TFile.GetLastWriteTime(FilePath)));
+            IntToStr(DateTimeToUnix(TFile.GetLastWriteTime(FilePath), {InputIsUTC=}False));
           AFileHashes.Add(FileHash);
         end;
       end;
@@ -451,6 +453,7 @@ var
   CurrentFileHash: string;
   Dir: string;
   DirName: string;
+  FolderLocallyUnchanged: Boolean;
 begin
   Inc(FFoldersChecked);
 
@@ -458,68 +461,81 @@ begin
   if ShouldExcludeFolder(AFolderPath) then
     Exit;
 
-  // Calculate current folder hash
+  // Calculate current folder hash (covers files in THIS folder + subfolder names)
   CurrentHash := CalculateFolderHash(AFolderPath, SubfolderNames, FileHashes);
   try
+    FolderLocallyUnchanged := False;
+
     // Check if folder exists in database
     if GetStoredFolderInfo(AFolderPath, StoredInfo) then
     begin
-      // Compare hashes - if they match, skip entire subtree
+      // Compare hashes - if they match, files in THIS folder haven't changed
+      // and no subfolders were added/removed.
+      // NOTE: This does NOT mean subfolders' contents are unchanged!
+      // The folder hash only includes subfolder NAMES, not their recursive content.
+      // We must always recurse into subfolders to detect deep changes.
       if (StoredInfo.FolderHash <> '') and (CurrentHash = StoredInfo.FolderHash) then
       begin
         Inc(FFoldersSkipped);
-        // Hash matches - no changes in this subtree
-        // This is the key optimization: skip all descendants
-        Exit;
+        FolderLocallyUnchanged := True;
+        // Don't Exit - still need to recurse into subfolders
+      end
+      else
+      begin
+        // Hash differs - check for deleted subfolders
+        DetectDeletedSubfolders(AFolderPath, StoredInfo.SubfoldersList,
+          SubfolderNames, ADeletedFiles);
       end;
-
-      // Hash differs - check for deleted subfolders first
-      DetectDeletedSubfolders(AFolderPath, StoredInfo.SubfoldersList,
-        SubfolderNames, ADeletedFiles);
     end;
 
-    // Check individual files in this folder
-    try
-      Files := TDirectory.GetFiles(AFolderPath, '*.pas', TSearchOption.soTopDirectoryOnly);
-      for FilePath in Files do
-      begin
-        if ShouldExcludeFile(FilePath) then
-          Continue;
-
-        Inc(FFilesChecked);
-        StoredHash := GetStoredFileHash(FilePath);
-
-        if StoredHash = '' then
+    // Check individual files in this folder (skip if folder locally unchanged)
+    if not FolderLocallyUnchanged then
+    begin
+      try
+        Files := TDirectory.GetFiles(AFolderPath, '*.pas', TSearchOption.soTopDirectoryOnly);
+        for FilePath in Files do
         begin
-          // New file
-          AChangedFiles.Add(FilePath);
-        end
-        else
-        begin
-          // Existing file - check content hash
-          CurrentFileHash := CalculateFileHash(FilePath);
-          if CurrentFileHash <> StoredHash then
-            AChangedFiles.Add(FilePath)
+          if ShouldExcludeFile(FilePath) then
+            Continue;
+
+          Inc(FFilesChecked);
+          StoredHash := GetStoredFileHash(FilePath);
+
+          if StoredHash = '' then
+          begin
+            // New file
+            AChangedFiles.Add(FilePath);
+          end
           else
-            Inc(FFilesSkipped);
+          begin
+            // Existing file - check content hash
+            CurrentFileHash := CalculateFileHash(FilePath);
+            if CurrentFileHash <> StoredHash then
+              AChangedFiles.Add(FilePath)
+            else
+              Inc(FFilesSkipped);
+          end;
+        end;
+      except
+        // Ignore file enumeration errors
+      end;
+
+      // Detect deleted files (in DB but not on filesystem)
+      for FilePath in FFileHashCache.Keys do
+      begin
+        // Check if file was in this folder
+        if SameText(ExtractFilePath(FilePath), IncludeTrailingPathDelimiter(AFolderPath)) then
+        begin
+          if not TFile.Exists(FilePath) then
+            ADeletedFiles.Add(FilePath);
         end;
       end;
-    except
-      // Ignore file enumeration errors
     end;
 
-    // Detect deleted files (in DB but not on filesystem)
-    for FilePath in FFileHashCache.Keys do
-    begin
-      // Check if file was in this folder
-      if SameText(ExtractFilePath(FilePath), IncludeTrailingPathDelimiter(AFolderPath)) then
-      begin
-        if not TFile.Exists(FilePath) then
-          ADeletedFiles.Add(FilePath);
-      end;
-    end;
-
-    // Recursively check subfolders
+    // ALWAYS recursively check subfolders, even if this folder's hash matched.
+    // The folder hash only reflects local files and subfolder names, not
+    // recursive content. Changes deep in a subfolder must be detected by
+    // descending into it.
     for DirName in SubfolderNames do
     begin
       Dir := TPath.Combine(AFolderPath, DirName);
