@@ -2,6 +2,13 @@
 
 All notable changes to delphi-lookup will be documented in this file.
 
+## [1.1.1] - 2026-02-13
+
+### Fixed
+- **Access Violation crash in delphi-lookup**: The `finally` block accessed `SearchResults.Count`
+  unconditionally, but `SearchResults` is nil when an exception occurs during the search phase.
+  This caused an AV at address 0x10 that also masked the real error message.
+
 ## [1.1.0] - 2026-02-10
 
 ### Added
