@@ -65,6 +65,7 @@ var
   UseSemanticSearch: Boolean;
   CandidateCount: Integer;
   RerankerURL: string;
+  OutputJSON: Boolean;
 
 function GetDefaultDatabasePath: string;
 begin
@@ -612,6 +613,9 @@ begin
   WriteLn('  If delphi-lookup.json exists next to the executable, it is loaded automatically.');
   WriteLn('  Command line options override config file values.');
   WriteLn;
+  WriteLn('Output:');
+  WriteLn('  --json               : Output results as JSON (machine-readable)');
+  WriteLn;
   WriteLn('Analytics:');
   WriteLn('  --stats              : Show usage statistics');
   WriteLn('  --clear-cache        : Clear query cache (invalidate all cached results)');
@@ -784,8 +788,8 @@ begin
   PM.EnableEnvironmentVars('DELPHI_LOOKUP_');
   PM.ParseCommandLine;
 
-  // Show loaded config file if any
-  if PM.GetLoadedDefaultConfigPath <> '' then
+  // Show loaded config file if any (suppress in JSON mode)
+  if (PM.GetLoadedDefaultConfigPath <> '') and not PM.HasParameter('json') then
     WriteLn('Config loaded: ' + PM.GetLoadedDefaultConfigPath);
 end;
 
@@ -897,6 +901,9 @@ begin
   if CandidateCount < 10 then CandidateCount := 10;
   if CandidateCount > 200 then CandidateCount := 200;
 
+  // JSON output mode
+  OutputJSON := PM.HasParameter('json');
+
   // Get query text (first positional argument)
   QueryText := GetFirstPositionalArg;
 
@@ -959,8 +966,11 @@ begin
         Halt(1);
       end;
 
-      WriteLn(Format('// Context for query: "%s"', [QueryText]));
-      WriteLn;
+      if not OutputJSON then
+      begin
+        WriteLn(Format('// Context for query: "%s"', [QueryText]));
+        WriteLn;
+      end;
 
       // Try to load from cache first (BEFORE initializing QueryProcessor to avoid lock)
       // Include search mode flags in hash to avoid mixing FTS5/semantic results
@@ -985,9 +995,12 @@ begin
         // Cache hit - no need to initialize QueryProcessor
         IsCacheHit := True;
         Stopwatch.Stop;
-        WriteLn(Format('// [CACHE HIT] Loaded %d results from cache in %d ms',
-          [SearchResults.Count, Stopwatch.ElapsedMilliseconds]));
-        WriteLn;
+        if not OutputJSON then
+        begin
+          WriteLn(Format('// [CACHE HIT] Loaded %d results from cache in %d ms',
+            [SearchResults.Count, Stopwatch.ElapsedMilliseconds]));
+          WriteLn;
+        end;
       end
       else
       begin
@@ -998,8 +1011,11 @@ begin
         // VectorSearch opens its own connection before QueryProcessor
         if UseSemanticSearch then
         begin
-          WriteLn('Parallel search mode: FTS5 + semantic running concurrently');
-          WriteLn;
+          if not OutputJSON then
+          begin
+            WriteLn('Parallel search mode: FTS5 + semantic running concurrently');
+            WriteLn;
+          end;
 
           // Create VectorSearch with its OWN connection (required for parallel execution)
           // Each thread needs separate SQLite connection for thread safety
@@ -1037,9 +1053,12 @@ begin
             TDatabaseConnectionHelper.LoadVec0Extension(QueryProcessor.Connection);
           end;
 
-          WriteLn(Format('Using two-stage search (Stage 1: %d candidates, Stage 2: rerank to top %d)',
-            [CandidateCount, NumResults]));
-          WriteLn;
+          if not OutputJSON then
+          begin
+            WriteLn(Format('Using two-stage search (Stage 1: %d candidates, Stage 2: rerank to top %d)',
+              [CandidateCount, NumResults]));
+            WriteLn;
+          end;
           SearchResults := QueryProcessor.PerformHybridSearchWithReranking(
             QueryText, NumResults, VectorSearch, True, CandidateCount, MaxDistance, RerankerURL);
         end
@@ -1056,7 +1075,8 @@ begin
           // Request more results from each source for better merge quality
           var ParallelMaxResults := NumResults * 2;
 
-          WriteLn(Format('Starting parallel search (requesting %d from each source)...', [ParallelMaxResults]));
+          if not OutputJSON then
+            WriteLn(Format('Starting parallel search (requesting %d from each source)...', [ParallelMaxResults]));
 
           var FTS5Task := TTask.Run(
             procedure
@@ -1110,13 +1130,15 @@ begin
           if not Assigned(SemanticResults) then
             SemanticResults := TSearchResultList.Create;
 
-          WriteLn(Format('Parallel search complete: FTS5=%d results, Semantic=%d results',
-            [FTS5Results.Count, SemanticResults.Count]));
+          if not OutputJSON then
+            WriteLn(Format('Parallel search complete: FTS5=%d results, Semantic=%d results',
+              [FTS5Results.Count, SemanticResults.Count]));
 
           // Merge results (takes ownership of input lists)
           SearchResults := MergeSearchResults(FTS5Results, SemanticResults, NumResults);
 
-          WriteLn(Format('Merged to %d unique results', [SearchResults.Count]));
+          if not OutputJSON then
+            WriteLn(Format('Merged to %d unique results', [SearchResults.Count]));
         end
         else
           // FTS5 only (no semantic search)
@@ -1126,11 +1148,16 @@ begin
       end;
 
       // Format and output results
-      ResultFormatter.FormatResults(SearchResults, QueryText);
-
-      WriteLn;
       SearchDurationMs := Stopwatch.ElapsedMilliseconds;
-      WriteLn(Format('// Search completed in %d ms', [SearchDurationMs]));
+
+      if OutputJSON then
+        ResultFormatter.FormatResultsAsJSON(SearchResults, QueryText, SearchDurationMs, IsCacheHit)
+      else
+      begin
+        ResultFormatter.FormatResults(SearchResults, QueryText);
+        WriteLn;
+        WriteLn(Format('// Search completed in %d ms', [SearchDurationMs]));
+      end;
 
     finally
       // Free connections first to release database locks

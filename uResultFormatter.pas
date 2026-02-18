@@ -23,12 +23,15 @@ type
   public
     procedure FormatResults(AResults: TSearchResultList; const AQuery: string);
     procedure FormatSingleResult(AResult: TSearchResult; AIndex: Integer);
+    procedure FormatResultsAsJSON(AResults: TSearchResultList; const AQuery: string;
+      ADurationMs: Integer; AIsCacheHit: Boolean);
   end;
 
 implementation
 
 uses
-  System.RegularExpressions;
+  System.RegularExpressions,
+  System.JSON;
 
 { TResultFormatter }
 
@@ -462,14 +465,14 @@ begin
     WriteLn('// - Concept descriptions (e.g., "database connection")');
     Exit;
   end;
-  
+
   WriteLn(Format('// Found %d result(s) for query: "%s"', [AResults.Count, AQuery]));
   WriteLn;
-  
+
   for I := 0 to AResults.Count - 1 do
   begin
     FormatSingleResult(AResults[I], I + 1);
-    
+
     // Add separator between results (except for the last one)
     if I < AResults.Count - 1 then
     begin
@@ -477,6 +480,57 @@ begin
       WriteLn('--------------------');
       WriteLn;
     end;
+  end;
+end;
+
+procedure TResultFormatter.FormatResultsAsJSON(AResults: TSearchResultList;
+  const AQuery: string; ADurationMs: Integer; AIsCacheHit: Boolean);
+var
+  Root: TJSONObject;
+  ResultsArr: TJSONArray;
+  ResultObj: TJSONObject;
+  I: Integer;
+  R: TSearchResult;
+  UnitName: string;
+begin
+  Root := TJSONObject.Create;
+  try
+    Root.AddPair('found', TJSONBool.Create(AResults.Count > 0));
+    Root.AddPair('query', AQuery);
+    Root.AddPair('result_count', TJSONNumber.Create(AResults.Count));
+    Root.AddPair('duration_ms', TJSONNumber.Create(ADurationMs));
+    Root.AddPair('cache_hit', TJSONBool.Create(AIsCacheHit));
+
+    ResultsArr := TJSONArray.Create;
+    for I := 0 to AResults.Count - 1 do
+    begin
+      R := AResults[I];
+      ResultObj := TJSONObject.Create;
+
+      ResultObj.AddPair('name', R.Name);
+      ResultObj.AddPair('type', R.SymbolType);
+      ResultObj.AddPair('file', R.FilePath);
+
+      // Extract unit name from file path
+      if R.FilePath <> '' then
+        UnitName := ChangeFileExt(ExtractFileName(R.FilePath), '')
+      else
+        UnitName := '';
+      ResultObj.AddPair('unit', UnitName);
+
+      ResultObj.AddPair('line', TJSONNumber.Create(R.StartLine));
+      ResultObj.AddPair('category', R.SourceCategory);
+      ResultObj.AddPair('framework', R.Framework);
+      ResultObj.AddPair('score', TJSONNumber.Create(R.Score));
+      ResultObj.AddPair('match_type', R.MatchType);
+
+      ResultsArr.AddElement(ResultObj);
+    end;
+    Root.AddPair('results', ResultsArr);
+
+    WriteLn(Root.ToJSON);
+  finally
+    Root.Free;
   end;
 end;
 

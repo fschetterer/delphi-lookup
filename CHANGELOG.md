@@ -2,6 +2,16 @@
 
 All notable changes to delphi-lookup will be documented in this file.
 
+## [1.2.0] - 2026-02-18
+
+### Added
+- **`--json` output flag**: Machine-readable JSON output for tool integration
+  - New `FormatResultsAsJSON` method in `TResultFormatter` using `System.JSON`
+  - Suppresses all informational WriteLn output in JSON mode (clean stdout)
+  - Schema: `found`, `query`, `result_count`, `duration_ms`, `cache_hit`, `results[]`
+  - Each result: `name`, `type`, `file`, `unit`, `line`, `category`, `framework`, `score`, `match_type`
+  - Used by delphi-compiler.exe to reliably parse lookup results (replaces fragile regex parsing)
+
 ## [1.1.1] - 2026-02-13
 
 ### Fixed
