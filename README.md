@@ -8,15 +8,15 @@ High-performance source code search system for Pascal codebases, optimized for A
 
 ## Features
 
-- **Fast** - ~100ms cached searches (~23x faster than uncached)
-- **FTS5 Search** - Exact + Fuzzy + Full-Text search
-- **Declaration Priority** - Declarations rank above implementations with `[Declaration]`/`[Impl]` badges
+- **Fast** - ~75ms end-to-end for identifier lookups (short-circuit on exact match), ~75ms cached
+- **Smart Search** - 3-phase cascade: exact NOCASE → prefix → substring, then FTS5 + fuzzy
+- **Declaration Priority** - Declarations rank above implementations with `[Decl]` badges
 - **Smart Caching** - Content-hash based cache that survives reindexing
 - **Incremental Indexing** - Merkle-style change detection; no-change verification in <10ms
 - **Parallel Processing** - Multi-threaded AST parsing and folder scanning
 - **Category Filtering** - Separate user code, stdlib, third-party
 - **Framework Detection** - Multi-tier VCL/FMX/RTL classification (packages, uses clause, path)
-- **Scalable** - Handles 480K+ symbols efficiently
+- **Scalable** - Tested with 672K+ symbols (3.2GB database)
 
 ## Quick Start
 
@@ -61,7 +61,7 @@ Pascal Source Files → delphi-indexer → SQLite Database (FTS5)
 
 **Components:**
 - **delphi-indexer** - Indexes Pascal code with AST parsing (parallel, incremental)
-- **delphi-lookup** - Fast hybrid search (exact + fuzzy + FTS5) with caching
+- **delphi-lookup** - Fast identifier lookup with short-circuit + hybrid search (fuzzy + FTS5) with caching
 - **Database** - SQLite with WAL mode, FTS5 full-text search, optional vector embeddings
 
 ## System Requirements
@@ -81,18 +81,19 @@ Pascal Source Files → delphi-indexer → SQLite Database (FTS5)
 
 ## Performance
 
-Wall-clock time (including exe startup overhead):
+End-to-end wall-clock time (exe startup + DB connection + search + formatting):
 
-| Operation | Speed | Details |
-|-----------|-------|---------|
-| **Cached search** | ~80-100ms | Repeated queries |
-| **Uncached search** | ~2.3s | First time (FTS5) |
-| **No-change reindex** | ~10ms | Merkle-style detection |
-| **Indexing** | ~43 chunks/sec | Parallel AST parsing |
+| Operation | End-to-end | Internal search | Details |
+|-----------|-----------|----------------|---------|
+| **Identifier lookup (cold)** | ~75ms | ~12ms | Exact name match with short-circuit |
+| **Identifier lookup (cached)** | ~75ms | ~10ms | From query_cache |
+| **Full search (cold)** | ~1.0-1.7s | ~950-1700ms | FTS5 + fuzzy (no short-circuit) |
+| **No-change reindex** | ~10ms | — | Merkle-style detection |
+| **Indexing** | ~43 chunks/sec | — | Parallel AST parsing |
 
-> Internal cache lookup is ~6ms; exe startup adds ~80ms overhead.
+> Exe startup overhead is ~65ms (process creation + DB connection + FTS5 detection). 83% of production queries are single-word Pascal identifiers that hit the short-circuit path.
 
-**Scalability**: Tested with 482K+ symbols, ~500MB database
+**Scalability**: Tested with 672K+ symbols, 3.2GB database
 
 ## Examples
 
@@ -123,26 +124,23 @@ delphi-indexer.exe --list-folders                      # Show indexed folders
 
 ## Output Format
 
-Results formatted for AI agent consumption:
+Compact format optimized for AI agent context windows (2-3 lines per result):
 
 ```
-// Context for query: "TStringList"
-// Found 3 result(s)
+// Context for query: "CrearQuery"
 
-// Result 1 (Exact Match - STDLIB [Declaration]): TStringList (type)
-// File: System.Classes.pas
-// Unit: System.Classes
-// Type: code | Category: stdlib | Framework: RTL
-// Relevance: 1.00
+Found 5 result(s) for "CrearQuery":
 
-TStringList = class(TStrings)
-  private
-    FList: TStringItemList;
-    ...
-end;
+1. [Decl] function CrearQuery(const pSQL:string='';const pPrepare:boolean=false):TQueryMAX; overload;
+   → TableMax.Query.pas [unit: TableMax.Query] (user, RTL)
+
+2. [Decl] function CrearQuery(const pQuery:string): TDataset; virtual; abstract;
+   → gmcSincronizarSQL.Tipos.Origen.pas [unit: gmcSincronizarSQL.Tipos.Origen] (user, RTL)
+
+// Search completed in 12 ms
 ```
 
-Declarations are prioritized and tagged with `[Declaration]`. Method implementations show `[Impl]`.
+Declarations are tagged with `[Decl]`. Use `--full` for verbose output with code snippets.
 
 ## Configuration
 
@@ -215,6 +213,6 @@ Third-party licenses are documented in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LIC
 
 ---
 
-**Version**: 1.1.0 (2026-02-10)
+**Version**: 1.4.0 (2026-02-26)
 **Target**: AI Coding Agents (Claude Code, Cursor, etc.)
 **Platform**: Windows x64

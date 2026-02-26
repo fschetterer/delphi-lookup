@@ -18,8 +18,8 @@ All notable changes to delphi-lookup will be documented in this file.
 - **Short-circuit on exact name match**: `PerformHybridSearch` skips fuzzy and FTS
   searches when an exact name match is found. Production query_log analysis (203 queries)
   showed 83% are single-word Pascal identifiers where the exact match is the desired result.
-  - Before: all search methods always run → avg 4,645ms cold
-  - After: identifier lookups exit after exact match → ~12ms cold (357x faster)
+  - Before: all search methods always run → avg 4,645ms end-to-end
+  - After: identifier lookups exit after exact match → ~75ms end-to-end (~12ms search + ~65ms exe overhead)
 - **`FetchAllExactMatches`**: Short-circuit returns all symbols with the matching name
   (overloads, declaration + implementation) up to `-n` limit, instead of just the first match.
   Still uses NOCASE index (~1ms for any count).
@@ -28,11 +28,13 @@ All notable changes to delphi-lookup will be documented in this file.
 
 ### Performance (672K symbols, 3.2GB database)
 
-| Query type | Before | After | Speedup |
+End-to-end = exe startup (~65ms) + search. Exe overhead is constant.
+
+| Query type | Before (end-to-end) | After (end-to-end) | Speedup |
 |---|---|---|---|
-| Identifier lookup (cold) | ~4,645ms | ~12ms | **357x** |
-| Identifier lookup (cached) | ~100ms | ~10ms | **10x** |
-| Multi-word / FTS content | ~3,400ms | ~1,700ms | **2x** |
+| Identifier lookup (cold) | ~4,645ms | ~75ms | **62x** |
+| Identifier lookup (cached) | ~100ms | ~75ms | **1.3x** |
+| Full search / FTS content | ~3,400ms | ~1.0-1.7s | **2-3x** |
 
 ## [1.3.0] - 2026-02-19
 

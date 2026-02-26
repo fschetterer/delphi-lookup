@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**delphi-lookup** is a high-performance Pascal source code search system designed for AI coding agents. It provides fast identifier lookup (~12ms cold) across large Pascal codebases using COLLATE NOCASE indexes with short-circuit optimization.
+**delphi-lookup** is a high-performance Pascal source code search system designed for AI coding agents. It provides fast identifier lookup (~75ms end-to-end) across large Pascal codebases using COLLATE NOCASE indexes with short-circuit optimization.
 
 **Features:**
-- Fast identifier lookup: ~12ms cold for exact name matches (short-circuit, no fuzzy/FTS)
+- Fast identifier lookup: ~75ms end-to-end (~12ms search + ~65ms exe overhead) with short-circuit
 - Full search: exact name + fuzzy matching + FTS5 full-text for non-identifier queries
 - Framework-aware: VCL/FMX/RTL classification and filtering
 - Documentation indexing: Official Delphi CHM help files
-- Query caching: ~10ms cache hits
+- Query caching: ~75ms end-to-end (~10ms search)
 - Incremental indexing: Only processes new/modified files
 
 > **Note on Vector/Semantic Search:** The codebase includes optional vector embeddings (via Ollama), but **FTS5-only is recommended** for AI agent workflows. Agents iterate fast and can achieve similar quality with multiple specific searches while being 17x faster. See "Vector Search Status" section for benchmark results.
@@ -300,13 +300,16 @@ delphi-indexer.exe "C:\...\source\vcl" --category stdlib --framework VCL
 - ~1,000 symbols in 25-30 seconds
 - Incremental: Only processes new/modified files
 
-**Searching (wall-clock time, including exe startup, 672K symbols / 3.2GB DB):**
+**Searching (672K symbols / 3.2GB DB):**
 
-| Query type | Example | Cold | Cached |
+| Query type | Example | End-to-end | Internal search |
 |---|---|---|---|
-| **Identifier lookup** (83% of real usage) | `TTableMAX`, `CrearQuery` | **~12ms** | ~10ms |
-| Multi-word / conceptual | `"control stock"` | ~1700ms | ~10ms |
-| FTS5 content search | `"singleton"` (no exact match) | ~600ms | ~10ms |
+| **Identifier lookup** (83% of real usage) | `TTableMAX`, `CrearQuery` | **~75ms** | ~12ms |
+| Full search (no exact match) | `"ErrorInformado"` | ~1.0s | ~950ms |
+| Multi-word / conceptual | `"control stock"` | ~1.7s | ~1700ms |
+| Cached (any) | — | ~75ms | ~10ms |
+
+> Exe startup overhead is ~65ms (process creation, DB connection, WAL pragma, FTS5 detection). This overhead is constant regardless of query type.
 
 **Search strategy (PerformHybridSearch):**
 1. **Exact name match** (COLLATE NOCASE index) — if found, returns all overloads/declarations up to `-n` and **short-circuits** (skips steps 2-4)
@@ -314,7 +317,7 @@ delphi-indexer.exe "C:\...\source\vcl" --category stdlib --framework VCL
 3. FTS5 full-text content search (with LIKE fallback)
 4. Vector similarity (optional, not recommended)
 
-> **Why short-circuit matters:** Production query_log analysis (203 queries) showed 83% are single-word Pascal identifiers. Before short-circuit, every query ran all 4 search methods (~4.6s cold). Now identifier lookups exit after step 1 in ~12ms.
+> **Why short-circuit matters:** Production query_log analysis (203 queries) showed 83% are single-word Pascal identifiers. Before short-circuit, every query ran all 4 search methods (~4.6s end-to-end). Now identifier lookups exit after step 1 in ~75ms end-to-end.
 
 **Scalability:**
 - Tested with 672,676 symbols
