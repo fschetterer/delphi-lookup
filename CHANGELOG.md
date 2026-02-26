@@ -2,6 +2,38 @@
 
 All notable changes to delphi-lookup will be documented in this file.
 
+## [1.4.0] - 2026-02-26
+
+### Changed
+- **COLLATE NOCASE indexes replace UPPER() scans**: All identifier queries now use
+  case-insensitive indexes instead of `UPPER(name) = UPPER(:q)` full table scans.
+  - `idx_symbols_name` (BINARY) → `idx_symbols_name_nocase` (COLLATE NOCASE)
+  - New `idx_symbols_parent_nocase` and `idx_symbols_fullname_nocase`
+  - Exact match: 249ms → 1ms (249x), prefix: 260ms → 3ms (87x), substring: 295ms → 117ms (3x)
+- **FTS5 MATCH for content search**: `PerformFullTextSearch` and `FindSymbolReferences`
+  now use FTS5 MATCH with BM25 ranking instead of LIKE full table scans. Falls back to
+  LIKE when FTS5 returns 0 results (compound identifiers like "ControlStock").
+  - Auto-detects FTS5 availability at initialization (`FFTS5Available`)
+  - `SanitizeFTS5Query` helper escapes FTS5 operators (AND, OR, NOT, NEAR)
+- **Short-circuit on exact name match**: `PerformHybridSearch` skips fuzzy and FTS
+  searches when an exact name match is found. Production query_log analysis (203 queries)
+  showed 83% are single-word Pascal identifiers where the exact match is the desired result.
+  - Before: all search methods always run → avg 4,645ms cold
+  - After: identifier lookups exit after exact match → ~12ms cold (357x faster)
+- **`FetchAllExactMatches`**: Short-circuit returns all symbols with the matching name
+  (overloads, declaration + implementation) up to `-n` limit, instead of just the first match.
+  Still uses NOCASE index (~1ms for any count).
+- **3-phase cascading search in `PerformExactSearch`**: exact NOCASE → prefix NOCASE → substring LIKE,
+  each progressively less selective. First two phases use index SEARCH; only substring requires SCAN.
+
+### Performance (672K symbols, 3.2GB database)
+
+| Query type | Before | After | Speedup |
+|---|---|---|---|
+| Identifier lookup (cold) | ~4,645ms | ~12ms | **357x** |
+| Identifier lookup (cached) | ~100ms | ~10ms | **10x** |
+| Multi-word / FTS content | ~3,400ms | ~1,700ms | **2x** |
+
 ## [1.3.0] - 2026-02-19
 
 ### Added
