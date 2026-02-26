@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**delphi-lookup** is a high-performance Pascal source code search system designed for AI coding agents. It provides fast cached searches (~100ms) across large Pascal codebases using FTS5 full-text search.
+**delphi-lookup** is a high-performance Pascal source code search system designed for AI coding agents. It provides fast identifier lookup (~12ms cold) across large Pascal codebases using COLLATE NOCASE indexes with short-circuit optimization.
 
 **Features:**
-- Fast search: exact name + fuzzy matching + FTS5 full-text
+- Fast identifier lookup: ~12ms cold for exact name matches (short-circuit, no fuzzy/FTS)
+- Full search: exact name + fuzzy matching + FTS5 full-text for non-identifier queries
 - Framework-aware: VCL/FMX/RTL classification and filtering
 - Documentation indexing: Official Delphi CHM help files
-- Query caching: ~100ms cache hits (~23x faster than uncached)
+- Query caching: ~10ms cache hits
 - Incremental indexing: Only processes new/modified files
 
 > **Note on Vector/Semantic Search:** The codebase includes optional vector embeddings (via Ollama), but **FTS5-only is recommended** for AI agent workflows. Agents iterate fast and can achieve similar quality with multiple specific searches while being 17x faster. See "Vector Search Status" section for benchmark results.
@@ -231,11 +232,17 @@ Detection validates consistency and warns about:
 - `symbols` - Symbol definitions (name, type, content, file_path, framework, etc.)
 - `symbols_fts` - FTS5 full-text search index
 - `vec_embeddings` - Vector embeddings (1536-dimensional)
-- `query_log` - Query caching and analytics
+- `query_cache` - Persistent query result cache (keyed by query_hash)
+- `query_log` - Query analytics and history
 - `indexed_folders` - Incremental indexing tracking
 - `packages` - Package registry with framework detection
 - `package_files` - File membership tracking
 - `metadata` - Self-describing schema info
+
+**Key indexes (COLLATE NOCASE for case-insensitive Pascal):**
+- `idx_symbols_name_nocase` — exact/prefix identifier lookup
+- `idx_symbols_fullname_nocase` — qualified name search
+- `idx_symbols_parent_nocase` — parent class search
 
 **Documentation fields:**
 - `framework` - VCL, FMX, RTL (auto-detected or manual)
@@ -293,25 +300,35 @@ delphi-indexer.exe "C:\...\source\vcl" --category stdlib --framework VCL
 - ~1,000 symbols in 25-30 seconds
 - Incremental: Only processes new/modified files
 
-**Searching (wall-clock time, including exe startup):**
-- **Cache hit:** ~80-100ms (repeated query)
-- **Cache miss:** ~2.3s (first query, FTS5 search)
-- **With reranking:** +100-150ms
+**Searching (wall-clock time, including exe startup, 672K symbols / 3.2GB DB):**
 
-> Note: Internal cache lookup is ~6ms, but exe startup adds ~80ms overhead.
+| Query type | Example | Cold | Cached |
+|---|---|---|---|
+| **Identifier lookup** (83% of real usage) | `TTableMAX`, `CrearQuery` | **~12ms** | ~10ms |
+| Multi-word / conceptual | `"control stock"` | ~1700ms | ~10ms |
+| FTS5 content search | `"singleton"` (no exact match) | ~600ms | ~10ms |
+
+**Search strategy (PerformHybridSearch):**
+1. **Exact name match** (COLLATE NOCASE index) — if found, returns all overloads/declarations up to `-n` and **short-circuits** (skips steps 2-4)
+2. Fuzzy name search (name/full_name/parent_class LIKE)
+3. FTS5 full-text content search (with LIKE fallback)
+4. Vector similarity (optional, not recommended)
+
+> **Why short-circuit matters:** Production query_log analysis (203 queries) showed 83% are single-word Pascal identifiers. Before short-circuit, every query ran all 4 search methods (~4.6s cold). Now identifier lookups exit after step 1 in ~12ms.
 
 **Scalability:**
-- Tested with 482,545+ symbols
-- Database: ~500MB
+- Tested with 672,676 symbols
+- Database: 3.2GB
 
 ## Search Quality
 
-**Recommended mode: FTS5-only** (~400ms latency)
-- Exact name matching
-- Fuzzy name matching (Levenshtein distance)
-- FTS5 full-text content search
+**Recommended mode: FTS5-only with COLLATE NOCASE indexes** (~12ms for identifiers)
+- Exact name matching via NOCASE index (SEARCH, not SCAN)
+- Cascading identifier lookup: exact → prefix → substring
+- FTS5 MATCH for content search (with LIKE fallback for compound tokens)
+- Fuzzy name matching across name/full_name/parent_class
 
-For AI coding agents that iterate (like Claude Code with Explore Agent), FTS5-only combined with multiple search passes provides better results than single-shot semantic search.
+For AI coding agents that iterate (like Claude Code with Explore Agent), the short-circuit on exact matches provides instant results for the dominant use case (identifier lookup), while FTS5 handles the remaining conceptual queries.
 
 ## Vector Search Status
 
@@ -356,7 +373,11 @@ See `BENCHMARK-embedding-quality.md` for detailed quality test results.
 4. **uDatabaseBuilder.pas** - SQLite storage with FTS5
 
 ### Search Pipeline
-1. **uQueryProcessor.pas** - 5-tier hybrid search
+1. **uQueryProcessor.pas** - Hybrid search with short-circuit optimization:
+   - `PerformExactSearch` → cascading NOCASE: exact → prefix → substring
+   - `FetchAllExactMatches` → returns all overloads/declarations on short-circuit
+   - `PerformFuzzySearch` → LIKE on name/full_name/parent_class (COLLATE NOCASE)
+   - `PerformFullTextSearch` → FTS5 MATCH with LIKE fallback
 2. **uVectorSearch.pas** - Vector similarity (optional)
 3. **uReranker.pas** - Two-stage reranking (optional)
 4. **uResultFormatter.pas** - AI-friendly output
@@ -469,6 +490,6 @@ QueryHash := GenerateQueryHash(Query, [Filters...]);
 
 ---
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Target:** AI Coding Agents (Claude Code, etc.)
 **Status:** Production-ready
