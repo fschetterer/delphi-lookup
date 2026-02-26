@@ -714,17 +714,21 @@ begin
   try
     WriteLn('Creating database indexes...');
     
-    // Primary search indexes
-    FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)';
+    // Primary search indexes (COLLATE NOCASE for case-insensitive Pascal identifiers)
+    // Note: exact BINARY lookups (name = :q) use sqlite_autoindex_symbols_1 from UNIQUE constraint
+    FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE)';
     FQuery.ExecSQL;
-    
+
     FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_symbols_type ON symbols(type)';
     FQuery.ExecSQL;
-    
+
     FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path)';
     FQuery.ExecSQL;
-    
-    FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_symbols_parent ON symbols(parent_class)';
+
+    FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_symbols_parent_nocase ON symbols(parent_class COLLATE NOCASE)';
+    FQuery.ExecSQL;
+
+    FQuery.SQL.Text := 'CREATE INDEX IF NOT EXISTS idx_symbols_fullname_nocase ON symbols(full_name COLLATE NOCASE)';
     FQuery.ExecSQL;
 
     // Classification indexes for filtering
