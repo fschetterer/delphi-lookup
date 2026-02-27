@@ -1,0 +1,21 @@
+{
+  "name": "delphi-lsp",
+  "description": "Delphi/Pascal language server for code intelligence (go-to-definition, references, hover, symbols)",
+  "version": "1.0.0",
+  "lspServers": {
+    "delphi": {
+      "command": "/mnt/w/Public/delphi-lookup/delphi-lsp-server.exe",
+      "args": ["--database", "W:\\Public\\delphi-lookup\\delphi_symbols.db"],
+      "extensionToLanguage": {
+        ".pas": "pascal",
+        ".dpr": "pascal",
+        ".dpk": "pascal",
+        ".inc": "pascal"
+      },
+      "env": {
+        "DELPHI_LSP_LOG": "/tmp/delphi-lsp.log"
+      },
+      "startupTimeout": 30000
+    }
+  }
+}

@@ -164,6 +164,13 @@ begin
       Exit;
     end
 
+    // Document sync notifications (no response)
+    else if (AMessage.Method = 'textDocument/didOpen') or
+            (AMessage.Method = 'textDocument/didChange') or
+            (AMessage.Method = 'textDocument/didClose') or
+            (AMessage.Method = 'textDocument/didSave') then
+      Exit
+
     // Document methods
     else if AMessage.Method = 'textDocument/definition' then
       Response := HandleTextDocumentDefinition(AMessage.Params)
@@ -228,6 +235,7 @@ begin
 
   // Build capabilities response
   Capabilities := TJSONObject.Create;
+  Capabilities.AddPair('textDocumentSync', TJSONNumber.Create(0));
   Capabilities.AddPair('definitionProvider', TJSONBool.Create(True));
   Capabilities.AddPair('referencesProvider', TJSONBool.Create(True));
   Capabilities.AddPair('hoverProvider', TJSONBool.Create(True));
