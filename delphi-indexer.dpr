@@ -132,7 +132,7 @@ begin
   WriteLn('Configuration:');
   WriteLn('  @<file>              : Load parameters from JSON/INI file');
   WriteLn('  --no-config          : Ignore default config file (delphi-lookup.json)');
-  WriteLn('  --database <file>    : SQLite database (default: delphi_symbols.db)');
+  WriteLn('  -d, --database <file>: SQLite database (default: delphi_symbols.db)');
   WriteLn('  --embedding-url <url>: Embedding service URL (empty = no embeddings)');
   WriteLn('                         If provider=ollama and no port, assumes :11434');
   WriteLn('  --embedding-model <m>: Model name (default: jina-code-embed-1-5b)');
@@ -523,7 +523,9 @@ begin
   // === Load configuration from PM ===
 
   // Database
-  DatabaseFile := PM.GetParameter('database', GetDefaultDatabasePath);
+  DatabaseFile    := PM.GetParameter('d', '');
+  if DatabaseFile = '' then
+    DatabaseFile := PM.GetParameter('database', GetDefaultDatabasePath);
   if not TPath.IsPathRooted(DatabaseFile) then
     DatabaseFile := TPath.Combine(ExtractFilePath(ParamStr(0)), DatabaseFile);
 
