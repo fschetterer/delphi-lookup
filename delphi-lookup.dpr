@@ -845,9 +845,12 @@ begin
   // === Load configuration from PM ===
 
   // Database
-  DatabaseFile := PM.GetParameter('database', PM.GetParameter('d', GetDefaultDatabasePath));
+  DatabaseFile    := PM.GetParameter('d', '');
+  if DatabaseFile = '' then
+    DatabaseFile := PM.GetParameter('database', GetDefaultDatabasePath);
   if not TPath.IsPathRooted(DatabaseFile) then
     DatabaseFile := TPath.Combine(ExtractFilePath(ParamStr(0)), DatabaseFile);
+
 
   // Check for --stats mode
   if PM.HasParameter('stats') then
@@ -1211,4 +1214,4 @@ begin
       Halt(1);
     end;
   end;
-end.\r
+end.
